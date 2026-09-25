@@ -1033,6 +1033,9 @@ async function openTrader(w) {
   stGet(`/v2/pnl/wallets/${w}`).then(d => {
     if (!alive()) return;
     if (d.identity?.name) { rememberIds([{ wallet: w, identity: d.identity }]); }
+    const S = d.summary || {}, A = d.analysis || {};
+    d = { ...d, ...S, pnl: S.pnl || d.pnl || {}, winRate: A.winRate ?? S.winRate ?? d.winRate, tokens: S.tokens || A.tokens || d.tokens || {},
+      counts: S.counts || d.counts || {}, roi: S.roi ?? A.roi ?? d.roi, timing: S.timing || d.timing || A.timing || {} };
     const p = d.pnl || {}, tk = d.tokens || {}, c = d.counts || {};
     $('#trSum').innerHTML = `<div class="num">
       <div class="kv"><span>Total profit</span><b class="${+p.total >= 0 ? 'up' : 'down'}">${fmtSigned(p.total)}</b></div>

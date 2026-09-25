@@ -335,6 +335,23 @@ async function leaderboardText(env, days) {
   }).join('\n') + '\n\nTrack one with /add followed by the address.';
 }
 
+
+// Solana Tracker wallet summary: fields may sit at the top level or under summary/analysis
+function walletSummary(d) {
+  const S = d.summary || {}, A = d.analysis || {};
+  const pick = (...v) => v.find(x => x !== undefined && x !== null);
+  return {
+    name: pick(d.identity?.name, S.identity?.name),
+    pnl: pick(S.pnl, d.pnl, {}),
+    winRate: pick(A.winRate, S.winRate, d.winRate),
+    counts: pick(S.counts, d.counts, A.counts, {}),
+    tokens: pick(S.tokens, A.tokens, d.tokens, {}),
+    invested: pick(S.invested, d.invested),
+    roi: pick(S.roi, A.roi, d.roi),
+    timing: pick(S.timing, d.timing, A.timing, {}),
+  };
+}
+const pctText = v => (v == null || !isFinite(v) ? '?' : Math.round(Math.abs(v) <= 1 ? v * 100 : v) + '%');
 // ---------------------------------------------------------------- Telegram commands
 const HELP = `<b>SolRadar</b>
 /top — famous traders, last 24h profit
@@ -389,10 +406,11 @@ async function handleCommand(env, text, chat) {
       const addr = find(q)?.addr || (ADDR_RE.test(q) ? q : null);
       if (!addr) return reply('Usage: /trader &lt;wallet or name&gt;');
       try {
-        const d = await stGet(env, `/v2/pnl/wallets/${addr}`);
-        const p = d.pnl || {};
-        return reply(`👤 <b>${esc(d.identity?.name || short(addr))}</b>\nTotal profit: ${signedUsd(p.total)}\nRealized: ${signedUsd(p.realized)} · Unrealized: ${signedUsd(p.unrealized)}\n` +
-          `Win rate: ${d.winRate != null ? Math.round(d.winRate <= 1 ? d.winRate * 100 : d.winRate) + '%' : '?'} · Trades: ${d.counts?.trades ?? '?'}\n🔗 <a href="https://gmgn.ai/sol/address/${addr}">GMGN</a>`);
+        const d = walletSummary(await stGet(env, `/v2/pnl/wallets/${addr}`));
+        const p = d.pnl, c = d.counts, tk = d.tokens;
+        const last = d.timing.lastTrade ? fmtAge(Date.now() - (d.timing.lastTrade < 1e12 ? d.timing.lastTrade * 1000 : d.timing.lastTrade)) + ' ago' : '?';
+        return reply(`👤 <b>${esc(d.name || short(addr))}</b>\nTotal profit: ${signedUsd(p.total)}\nRealized: ${signedUsd(p.realized)} · Unrealized: ${signedUsd(p.unrealized)}\n` +
+          `Win rate: ${pctText(d.winRate)}${tk.profitable != null ? ` (${tk.profitable} won / ${tk.losing} lost)` : ''}\nTrades: ${c.trades ?? '?'} on ${c.tokensTraded ?? '?'} tokens · last ${last}\n🔗 <a href="https://gmgn.ai/sol/address/${addr}">GMGN</a> · <a href="https://kolscan.io/account/${addr}">Kolscan</a>`);
       } catch (e) { return reply('⚠️ ' + esc(e.message)); }
     }
     case '/auto': {
@@ -422,6 +440,12 @@ async function handleCommand(env, text, chat) {
       const last = st.trades[0];
       return reply(`<b>Status</b>\nHelius feed: ${hook}\nWallets: ${cfg.wallets.length} (${cfg.wallets.filter(w => w.auto).length} auto)\nAlerts: ${cfg.paused ? '⏸ paused' : '▶️ on'} · min ${cfg.minSol} SOL\n` +
         `Last trade seen: ${last ? fmtAge(Date.now() - last.time * 1000) + ' ago' : 'none yet'}\nStorage writes today: ${st.writes || 0}/${MAX_KV_WRITES}`);
+    }
+    case '/raw': {
+      const addr = find(args.join(' '))?.addr || args[0];
+      if (!addr || !ADDR_RE.test(addr)) return reply('Usage: /raw &lt;wallet&gt;');
+      const d = await stGet(env, `/v2/pnl/wallets/${addr}`).catch(e => ({ error: e.message }));
+      return reply('<code>' + esc(JSON.stringify(d).slice(0, 3500)) + '</code>');
     }
     case '/copy': return reply(await copyCommand(env, args));
     case '/sellall': {
