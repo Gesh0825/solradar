@@ -1,0 +1,1117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SolRadar">
+<meta name="theme-color" content="#0A0E17">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<title>SolRadar</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#0A0E17; --surface:#111726; --surface2:#182033; --line:#222B40;
+  --text:#E9EDF5; --muted:#8792A8; --faint:#5B6479;
+  --accent:#F2B84B; --accent-ink:#1A1204;
+  --up:#2BD393; --up-bg:rgba(43,211,147,.13);
+  --down:#FF5C70; --down-bg:rgba(255,92,112,.13);
+  --r:14px;
+  --top: env(safe-area-inset-top, 0px);
+  --bot: env(safe-area-inset-bottom, 0px);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.35}
+body{padding-bottom:calc(72px + var(--bot));min-height:100%;overscroll-behavior-y:none}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+input,select,textarea{font:inherit;font-size:16px;color:var(--text);background:var(--surface2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+a{color:inherit;text-decoration:none}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono)}
+[hidden]{display:none!important}
+
+/* header */
+.top{position:sticky;top:0;z-index:20;background:rgba(10,14,23,.86);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  padding:calc(var(--top) + 8px) 16px 10px;border-bottom:1px solid var(--line)}
+.top-row{display:flex;align-items:center;gap:10px}
+.brand{font-weight:750;font-size:21px;letter-spacing:-.02em;display:flex;align-items:center;gap:8px}
+.brand i{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(242,184,75,.18)}
+.spacer{flex:1}
+.iconbtn{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:var(--surface2)}
+.iconbtn svg{width:18px;height:18px}
+.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.search{margin-top:10px;position:relative}
+.search input{padding-left:36px;background:var(--surface);}
+.search svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted)}
+.chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-top:10px}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:7px 12px;border-radius:999px;background:var(--surface);color:var(--muted);font-size:13px;font-weight:600;border:1px solid var(--line)}
+.chip[aria-pressed="true"]{background:var(--text);color:var(--bg);border-color:var(--text)}
+.chip.small{padding:5px 10px;font-size:12px}
+.subrow{display:flex;align-items:center;gap:8px;margin-top:8px}
+.subrow .label{font-size:12px;color:var(--faint);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+
+/* list rows */
+.list{padding:4px 0}
+.row{display:grid;grid-template-columns:40px 1fr auto;gap:12px;align-items:center;width:100%;text-align:left;padding:11px 16px;border-bottom:1px solid rgba(34,43,64,.6)}
+.row:active{background:var(--surface)}
+.av{width:40px;height:40px;border-radius:50%;background:var(--surface2);overflow:hidden;display:grid;place-items:center;font-weight:700;font-size:13px;color:var(--muted)}
+.av img{width:100%;height:100%;object-fit:cover}
+.rmain{min-width:0;display:flex;flex-direction:column;gap:2px}
+.sym{font-weight:650;font-size:16px;display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag{font-size:11px;font-weight:600;color:var(--muted);background:var(--surface2);border-radius:6px;padding:1px 6px}
+.tag.new{color:var(--accent);background:rgba(242,184,75,.12)}
+.rright{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.px{font-weight:600;font-size:15px}
+.px sub{font-size:.7em;vertical-align:-.15em}
+.chg{font-size:12.5px;font-weight:650;padding:2px 7px;border-radius:6px;min-width:62px;text-align:center}
+.up{color:var(--up)} .down{color:var(--down)}
+.chg.up{background:var(--up-bg)} .chg.down{background:var(--down-bg)} .chg.flat{color:var(--muted);background:var(--surface2)}
+.empty{padding:40px 24px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--text);font-size:16px;margin-bottom:6px}
+.skel .av,.skel .sk{background:linear-gradient(90deg,var(--surface) 0,var(--surface2) 50%,var(--surface) 100%);background-size:200% 100%;animation:sh 1.2s infinite}
+.sk{height:12px;border-radius:6px}
+@keyframes sh{to{background-position:-200% 0}}
+
+/* cards / sections */
+.section{padding:14px 16px 6px}
+.h{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 0 8px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px}
+.stack{display:flex;flex-direction:column;gap:10px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 14px;border-radius:12px;background:var(--surface2);font-weight:650;font-size:14px;border:1px solid var(--line)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.danger{color:var(--down)}
+.btn.block{width:100%}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn-row .btn{flex:1 1 0;min-width:0}
+.note{font-size:13px;color:var(--muted);line-height:1.45}
+.note a{color:var(--accent)}
+
+/* feed */
+.trade{display:grid;grid-template-columns:50px 1fr auto;gap:12px;align-items:center;width:100%;text-align:left;padding:11px 16px;border-bottom:1px solid rgba(34,43,64,.6)}
+.trade:active{background:var(--surface)}
+.side{font-size:11.5px;font-weight:800;letter-spacing:.05em;border-radius:7px;padding:5px 0;text-align:center}
+.side.buy{color:var(--up);background:var(--up-bg)}
+.side.sell{color:var(--down);background:var(--down-bg)}
+.cluster{background:linear-gradient(135deg,rgba(242,184,75,.16),rgba(242,184,75,.04));border:1px solid rgba(242,184,75,.35);border-radius:var(--r);padding:12px 14px;width:100%;text-align:left;display:flex;flex-direction:column;gap:4px}
+.cluster .t{font-weight:700;color:var(--accent);font-size:13px;letter-spacing:.03em}
+.wchips{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding:2px 16px 4px}
+.wchips::-webkit-scrollbar{display:none}
+.wchip{flex:none;display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:12px;background:var(--surface);border:1px solid var(--line);font-size:13.5px;font-weight:600}
+.wchip .dot{width:8px;height:8px;border-radius:50%}
+.wchip.add{color:var(--accent);border-style:dashed;border-color:rgba(242,184,75,.5)}
+.sync{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.sync i{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.sync.live i{background:var(--up);box-shadow:0 0 0 3px var(--up-bg)}
+
+/* tab bar */
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:30;display:grid;grid-template-columns:repeat(5,1fr);
+  background:rgba(12,16,26,.92);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-top:1px solid var(--line);padding:6px 6px calc(6px + var(--bot))}
+.tab{display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0;font-size:10.5px;font-weight:600;color:var(--faint)}
+.tab svg{width:24px;height:24px}
+.tab[aria-selected="true"]{color:var(--accent)}
+.badge{position:absolute;margin-left:18px;margin-top:-2px;min-width:16px;height:16px;border-radius:8px;background:var(--down);color:#fff;font-size:10px;display:grid;place-items:center;padding:0 4px}
+
+/* sheets */
+.sheet{position:fixed;inset:0;z-index:50;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;transform:translateY(100%);transition:transform .28s cubic-bezier(.2,.8,.2,1);padding-bottom:calc(24px + var(--bot))}
+.sheet.open{transform:none}
+#walletSheet{z-index:45}
+#traderSheet{z-index:47}
+.lrow{display:grid;grid-template-columns:22px 40px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;padding:11px 16px;border-bottom:1px solid rgba(34,43,64,.6)}
+.lrow:active{background:var(--surface)}
+.rank{font-size:13px;font-weight:700;color:var(--faint);text-align:center}
+.rank.top3{color:var(--accent)}
+.pnl{font-weight:750;font-size:16px}
+.trk{font-size:12px;font-weight:700;padding:4px 9px;border-radius:8px;border:1px solid rgba(242,184,75,.45);color:var(--accent)}
+.trk.on{border-color:var(--line);color:var(--muted)}
+.handle{color:var(--muted);font-weight:500;font-size:13px}
+.pos{display:grid;grid-template-columns:32px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;padding:9px 0;border-bottom:1px solid rgba(34,43,64,.6)}
+.pos .av{width:32px;height:32px;font-size:11px}
+.pos:last-child{border-bottom:0}
+.hero{display:flex;flex-direction:column;gap:2px;padding:16px 16px 4px}
+.hero small{font-size:12px;color:var(--faint);font-weight:650;text-transform:uppercase;letter-spacing:.05em}
+.hero b{font-size:32px;font-weight:750;letter-spacing:-.02em}
+.sheet-head{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;padding:calc(var(--top) + 8px) 12px 10px;background:rgba(10,14,23,.9);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid var(--line)}
+.sheet-title{flex:1;min-width:0;display:flex;align-items:center;gap:10px}
+.sheet-title .av{width:32px;height:32px;flex:none;font-size:11px}
+.sheet-title b{font-size:17px}
+.sheet-title > div > span{font-size:12.5px;color:var(--muted);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.star svg{fill:none;stroke:currentColor}
+.star[aria-pressed="true"]{color:var(--accent)}
+.star[aria-pressed="true"] svg{fill:var(--accent)}
+.bigpx{font-size:34px;font-weight:750;letter-spacing:-.02em;padding:16px 16px 4px}
+.tfrow{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:4px 16px 12px}
+.tf{background:var(--surface);border-radius:10px;padding:7px 0;text-align:center;font-size:13px;font-weight:650}
+.tf small{display:block;font-size:11px;color:var(--faint);font-weight:600}
+.chart{height:380px;margin:0 0 4px;background:var(--surface);border-block:1px solid var(--line)}
+.chart iframe{width:100%;height:100%;border:0;display:block}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px}
+.stat small{display:block;font-size:11px;color:var(--faint);font-weight:650;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+.stat b{font-size:15px}
+.bs{height:6px;border-radius:3px;background:var(--down);overflow:hidden;margin-top:6px}
+.bs i{display:block;height:100%;background:var(--up)}
+.ca{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.ca code{flex:1;min-width:0;font-family:var(--mono);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.links{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.hold{display:grid;grid-template-columns:32px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;padding:9px 0;border-bottom:1px solid rgba(34,43,64,.6)}
+.hold .av{width:32px;height:32px;font-size:11px}
+.kv{display:flex;justify-content:space-between;gap:10px;font-size:14px;padding:4px 0}
+.kv span:first-child{color:var(--muted)}
+
+/* toast */
+.toast{position:fixed;left:16px;right:16px;bottom:calc(84px + var(--bot));z-index:80;background:var(--text);color:var(--bg);font-weight:600;font-size:14px;border-radius:12px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.4);transform:translateY(20px);opacity:0;transition:.25s;pointer-events:none}
+.toast.show{transform:none;opacity:1}
+
+@media (prefers-reduced-motion: reduce){
+  .sheet,.toast{transition:none}
+  .spin svg,.skel .av,.skel .sk{animation:none}
+}
+@media (min-width:700px){
+  .list,.section,#feed,.wchips{max-width:720px;margin-inline:auto}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== Markets ===== -->
+<section id="v-markets">
+  <header class="top">
+    <div class="top-row">
+      <div class="brand"><i></i>SolRadar</div>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="refreshBtn" aria-label="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+      </button>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" type="search" placeholder="Search token or paste contract address" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+    </div>
+    <div class="chips" id="segs" role="tablist">
+      <button class="chip" data-seg="trending" aria-pressed="true">🔥 Trending</button>
+      <button class="chip" data-seg="new" aria-pressed="false">New &lt;24h</button>
+      <button class="chip" data-seg="gainers" aria-pressed="false">Gainers</button>
+      <button class="chip" data-seg="volume" aria-pressed="false">Volume</button>
+      <button class="chip" data-seg="watch" aria-pressed="false">★ Watchlist</button>
+    </div>
+    <div class="subrow">
+      <span class="label">Change</span>
+      <div class="chips" id="tfs" style="margin-top:0">
+        <button class="chip small" data-tf="m5">5m</button>
+        <button class="chip small" data-tf="h1">1h</button>
+        <button class="chip small" data-tf="h6">6h</button>
+        <button class="chip small" data-tf="h24">24h</button>
+      </div>
+    </div>
+  </header>
+  <div class="list" id="mlist"></div>
+</section>
+
+<!-- ===== Leaders ===== -->
+<section id="v-leaders" hidden>
+  <header class="top">
+    <div class="top-row">
+      <div class="brand"><i></i>Top Traders</div>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="lbRefresh" aria-label="Refresh leaderboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+      </button>
+    </div>
+    <div class="chips" id="lbKinds">
+      <button class="chip" data-lb="kols" aria-pressed="true">⭐ Famous traders</button>
+      <button class="chip" data-lb="top" aria-pressed="false">All wallets</button>
+    </div>
+    <div class="subrow">
+      <span class="label">Profit in</span>
+      <div class="chips" id="lbPeriods" style="margin-top:0">
+        <button class="chip small" data-p="1" aria-pressed="true">24h</button>
+        <button class="chip small" data-p="7" aria-pressed="false">7 days</button>
+        <button class="chip small" data-p="30" aria-pressed="false">30 days</button>
+      </div>
+    </div>
+  </header>
+  <div id="lbNoKey" class="section" hidden>
+    <div class="card stack">
+      <b>Connect the app to your SolRadar server</b>
+      <p class="note" style="margin:0">Copy the connection code from your Telegram bot's "SolRadar is live" message and paste it in Settings.</p>
+      <button class="btn primary" data-goto="settings">Open Settings</button>
+    </div>
+  </div>
+  <div class="list" id="lblist"></div>
+</section>
+
+<!-- ===== Wallets ===== -->
+<section id="v-wallets" hidden>
+  <header class="top">
+    <div class="top-row">
+      <div class="brand"><i></i>Smart Wallets</div>
+      <div class="spacer"></div>
+      <span class="sync" id="sync"><i></i><span>Idle</span></span>
+      <button class="iconbtn" id="pollBtn" aria-label="Check wallets now">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
+      </button>
+    </div>
+    <div class="chips" id="feedSegs">
+      <button class="chip" data-f="all" aria-pressed="true">All trades</button>
+      <button class="chip" data-f="BUY" aria-pressed="false">Buys</button>
+      <button class="chip" data-f="SELL" aria-pressed="false">Sells</button>
+    </div>
+  </header>
+  <div id="noKey" class="section" hidden>
+    <div class="card stack">
+      <b>Connect the app to your SolRadar server</b>
+      <p class="note" style="margin:0">Copy the connection code from your Telegram bot's "SolRadar is live" message and paste it in Settings. Your server watches the wallets 24/7, even when this app is closed.</p>
+      <button class="btn primary" data-goto="settings">Open Settings</button>
+    </div>
+  </div>
+  <div class="section" style="padding-bottom:0"><h2 class="h">Tracked wallets</h2></div>
+  <div class="wchips" id="wchips"></div>
+  <form id="addForm" class="section stack" hidden>
+    <input id="addAddr" placeholder="Wallet address" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input id="addLabel" placeholder="Name (optional), e.g. Whale 1" autocomplete="off">
+    <div class="btn-row"><button type="button" class="btn" id="addCancel">Cancel</button><button class="btn primary" type="submit">Track wallet</button></div>
+  </form>
+  <div class="section stack" id="clusters"></div>
+  <div class="section" style="padding-bottom:0"><h2 class="h">Live feed</h2></div>
+  <div id="feed"></div>
+</section>
+
+<!-- ===== Settings ===== -->
+<section id="v-settings" hidden>
+  <header class="top"><div class="top-row"><div class="brand"><i></i>Settings</div></div></header>
+  <div class="section stack">
+    <h2 class="h">Connection</h2>
+    <div class="card stack">
+      <div class="kv"><span>Server</span><b id="sConnState">Not connected</b></div>
+      <textarea id="sCode" rows="3" class="mono" style="font-size:13px" placeholder="Paste the connection code from Telegram" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+      <button class="btn primary" id="sConnect" type="button">Connect</button>
+      <p class="note" style="margin:0">The code is in the "SolRadar is live" message from your Telegram bot. Tap and hold it there to copy.</p>
+    </div>
+  </div>
+  <div class="section stack" id="sServer" hidden>
+    <h2 class="h">Telegram alerts (24/7)</h2>
+    <div class="card stack">
+      <label class="kv"><span>Auto-track famous traders</span>
+        <select id="sAuto" style="width:auto"><option value="on">On</option><option value="off">Off</option></select></label>
+      <label class="kv"><span>How many (top by 24h profit)</span>
+        <select id="sAutoN" style="width:auto"><option>5</option><option>10</option><option>15</option><option>20</option><option>30</option></select></label>
+      <label class="kv"><span>Alert me for trades from</span>
+        <select id="sSrvMin" style="width:auto"><option value="0">Any size</option><option value="0.1">0.1 SOL</option><option value="0.5">0.5 SOL</option><option value="1">1 SOL</option><option value="5">5 SOL</option></select></label>
+      <label class="kv"><span>Alerts</span>
+        <select id="sPaused" style="width:auto"><option value="on">On</option><option value="paused">Paused</option></select></label>
+      <button class="btn primary" id="sSrvSave" type="button">Save alert settings</button>
+      <p class="note" style="margin:0">Famous traders are refreshed every 6 hours from the 24h profit leaderboard. Wallets you add yourself are never removed.</p>
+    </div>
+  </div>
+  <div class="section stack">
+    <h2 class="h">In the app</h2>
+    <div class="card stack">
+      <label class="kv"><span>Refresh the feed every</span>
+        <select id="sPoll" style="width:auto"><option value="15">15 s</option><option value="30">30 s</option><option value="60">1 min</option></select></label>
+      <label class="kv"><span>Hide trades smaller than</span>
+        <select id="sMin" style="width:auto"><option value="0">Show all</option><option value="0.1">0.1 SOL</option><option value="0.5">0.5 SOL</option><option value="1">1 SOL</option><option value="5">5 SOL</option></select></label>
+    </div>
+  </div>
+  <div class="section stack">
+    <h2 class="h">About</h2>
+    <div class="card stack">
+      <p class="note" style="margin:0">Market data from DexScreener. Trader profit from Solana Tracker. Live trades from Helius, delivered by your own server on Cloudflare. SolRadar only reads data and can't move funds. Trades open in Phantom or Jupiter.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Token sheet ===== -->
+<div class="sheet" id="tokenSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="iconbtn" data-close="tokenSheet" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+    <div class="sheet-title" id="tTitle"></div>
+    <button class="iconbtn star" id="tStar" aria-pressed="false" aria-label="Add to watchlist"><svg viewBox="0 0 24 24" stroke-width="2" stroke-linejoin="round"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></svg></button>
+  </div>
+  <div id="tBody"></div>
+</div>
+
+<!-- ===== Wallet sheet ===== -->
+<div class="sheet" id="walletSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="iconbtn" data-close="walletSheet" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+    <div class="sheet-title" id="wTitle"></div>
+  </div>
+  <div id="wBody"></div>
+</div>
+
+<!-- ===== Trader sheet ===== -->
+<div class="sheet" id="traderSheet" aria-hidden="true">
+  <div class="sheet-head">
+    <button class="iconbtn" data-close="traderSheet" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg></button>
+    <div class="sheet-title" id="trTitle"></div>
+  </div>
+  <div id="trBody"></div>
+</div>
+
+<!-- ===== Tab bar ===== -->
+<nav class="tabs" role="tablist">
+  <button class="tab" data-tab="markets" aria-selected="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-5 4 4 8-9"/><path d="M15 7h5v5"/></svg>Markets</button>
+  <button class="tab" data-tab="leaders" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/></svg>Leaders</button>
+  <button class="tab" data-tab="wallets" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6-6"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>Wallets<span class="badge" id="badge" hidden>0</span></button>
+  <button class="tab" data-tab="watch" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></svg>Watchlist</button>
+  <button class="tab" data-tab="settings" aria-selected="false">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+</nav>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+'use strict';
+/* ---------- basics ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('sr.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('sr.' + k, JSON.stringify(v)); } catch {} },
+};
+const DS = 'https://api.dexscreener.com';
+const WSOL = 'So11111111111111111111111111111111111111112';
+const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+const QUOTES = new Set([WSOL, USDC, USDT]);
+const ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const WCOLORS = ['#F2B84B', '#6EA8FF', '#2BD393', '#FF7AB6', '#B48CFF', '#4FD1E0', '#FF9A4D', '#C7E36B'];
+
+const st = {
+  s: Object.assign({ conn: null, poll: 30, minSol: 0.1, tf: 'h1' }, LS.get('settings', {})),
+  server: null,
+  ids: LS.get('ids', {}), lbKind: 'kols', lbDays: 1, lbRows: [],
+  wallets: LS.get('wallets', []),
+  watch: LS.get('watch', []),
+  trades: LS.get('trades', {}),
+  last: LS.get('last', {}),
+  meta: LS.get('meta', {}),
+  seg: 'trending', feedF: 'all', tab: 'markets', pool: [], unseen: 0,
+};
+const saveS = () => LS.set('settings', st.s);
+
+/* ---------- formatting ---------- */
+function fmtUsd(n) {
+  n = +n; if (!isFinite(n) || n === 0) return '—';
+  const a = Math.abs(n);
+  if (a >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+}
+function fmtPrice(p) {
+  p = +p; if (!isFinite(p) || p <= 0) return '—';
+  if (p >= 1000) return '$' + p.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (p >= 1) return '$' + p.toFixed(p >= 100 ? 2 : 3);
+  if (p >= 0.001) return '$' + p.toPrecision(4);
+  const zeros = Math.floor(-Math.log10(p));
+  const digits = Math.round(p * 10 ** (zeros + 3));
+  return `$0.0<sub>${zeros}</sub>${digits}`;
+}
+function fmtNum(n) {
+  n = +n; if (!isFinite(n)) return '—';
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return a >= 1 ? n.toFixed(2) : n.toPrecision(3);
+}
+function pct(v) {
+  if (v == null || !isFinite(v)) return { t: '—', c: 'flat' };
+  const t = (v > 0 ? '+' : '') + (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-US') : v.toFixed(Math.abs(v) >= 100 ? 0 : 1)) + '%';
+  return { t, c: v > 0 ? 'up' : v < 0 ? 'down' : 'flat' };
+}
+function age(ms) {
+  if (!ms) return '';
+  const m = (Date.now() - ms) / 60000;
+  if (m < 60) return Math.max(1, Math.round(m)) + 'm';
+  if (m < 1440) return Math.round(m / 60) + 'h';
+  if (m < 43200) return Math.round(m / 1440) + 'd';
+  return Math.round(m / 43200) + 'mo';
+}
+const ago = sec => age(sec * 1000) + ' ago';
+const short = a => a.slice(0, 4) + '…' + a.slice(-4);
+function avatar(img, sym) {
+  const init = esc((sym || '?').replace(/^\$/, '').slice(0, 2).toUpperCase());
+  return img ? `<span class="av"><img src="${esc(img)}" alt="" loading="lazy" onerror="this.parentNode.textContent='${init}'"></span>` : `<span class="av">${init}</span>`;
+}
+
+/* ---------- toast / copy ---------- */
+let toastT;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600);
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); toast('Copied'); }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('Copied'); } catch { toast('Copy failed, long-press to copy'); } ta.remove();
+  }
+}
+
+/* ---------- DexScreener ---------- */
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+const pairCache = new Map(); // mint -> {t, p}
+async function getPairs(mints, force = false) {
+  const out = {}, need = [];
+  for (const m of new Set(mints)) {
+    const c = pairCache.get(m);
+    if (c && !force && Date.now() - c.t < 20000) { if (c.p) out[m] = c.p; } else need.push(m);
+  }
+  for (let i = 0; i < need.length; i += 30) {
+    const chunk = need.slice(i, i + 30);
+    let arr = [];
+    try { arr = await getJSON(`${DS}/tokens/v1/solana/${chunk.join(',')}`); } catch (e) { console.warn(e); }
+    const best = {};
+    for (const p of arr || []) {
+      const m = p.baseToken?.address;
+      if (!chunk.includes(m)) continue;
+      if (!best[m] || (p.liquidity?.usd || 0) > (best[m].liquidity?.usd || 0)) best[m] = p;
+    }
+    for (const m of chunk) {
+      pairCache.set(m, { t: Date.now(), p: best[m] || null });
+      if (best[m]) {
+        out[m] = best[m];
+        st.meta[m] = { sym: best[m].baseToken.symbol, name: best[m].baseToken.name, img: best[m].info?.imageUrl || '' };
+      }
+    }
+  }
+  LS.set('meta', st.meta);
+  return out;
+}
+
+/* ---------- Markets ---------- */
+const mlist = $('#mlist');
+function skeleton(n = 8) {
+  return Array.from({ length: n }, () => `<div class="row skel"><span class="av"></span><span class="rmain"><span class="sk" style="width:40%"></span><span class="sk" style="width:75%"></span></span><span class="rright"><span class="sk" style="width:60px"></span></span></div>`).join('');
+}
+function tokenRow(p) {
+  const m = p.baseToken.address, sym = p.baseToken.symbol;
+  const ch = pct(p.priceChange?.[st.s.tf]);
+  const a = age(p.pairCreatedAt);
+  const fresh = p.pairCreatedAt && Date.now() - p.pairCreatedAt < 864e5;
+  return `<button class="row" data-mint="${esc(m)}">
+    ${avatar(p.info?.imageUrl, sym)}
+    <span class="rmain">
+      <span class="sym">${esc(sym)} ${a ? `<span class="tag ${fresh ? 'new' : ''}">${a}</span>` : ''}</span>
+      <span class="sub num">MC ${fmtUsd(p.marketCap || p.fdv)} · Liq ${fmtUsd(p.liquidity?.usd)} · Vol ${fmtUsd(p.volume?.h24)}</span>
+    </span>
+    <span class="rright num"><span class="px">${fmtPrice(p.priceUsd)}</span><span class="chg ${ch.c}">${ch.t}</span></span>
+  </button>`;
+}
+let marketsBusy = false;
+async function loadMarkets(showSkel) {
+  if (marketsBusy) return; marketsBusy = true;
+  $('#refreshBtn').classList.add('spin');
+  if (showSkel && !st.pool.length) mlist.innerHTML = skeleton();
+  try {
+    const res = await Promise.allSettled(['/token-boosts/top/v1', '/token-boosts/latest/v1', '/token-profiles/latest/v1', '/community-takeovers/latest/v1'].map(p => getJSON(DS + p)));
+    const mints = [];
+    for (const r of res) if (r.status === 'fulfilled' && Array.isArray(r.value))
+      for (const x of r.value) if (x.chainId === 'solana' && x.tokenAddress && !mints.includes(x.tokenAddress)) mints.push(x.tokenAddress);
+    const pairs = await getPairs(mints, true);
+    st.pool = mints.map(m => pairs[m]).filter(Boolean);
+    if (!st.pool.length && res.every(r => r.status === 'rejected')) throw new Error('offline');
+  } catch (e) {
+    if (!st.pool.length) mlist.innerHTML = `<div class="empty"><b>Can't reach DexScreener</b>Check your connection and tap refresh.</div>`;
+  }
+  $('#refreshBtn').classList.remove('spin');
+  marketsBusy = false;
+  if (!$('#q').value.trim()) renderMarkets();
+}
+async function renderMarkets() {
+  let list = st.pool.slice();
+  const tf = st.s.tf;
+  if (st.seg === 'new') list = list.filter(p => p.pairCreatedAt && Date.now() - p.pairCreatedAt < 864e5).sort((a, b) => b.pairCreatedAt - a.pairCreatedAt);
+  else if (st.seg === 'gainers') list = list.filter(p => (p.liquidity?.usd || 0) > 5000).sort((a, b) => (b.priceChange?.[tf] ?? -1e9) - (a.priceChange?.[tf] ?? -1e9));
+  else if (st.seg === 'volume') list.sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0));
+  else if (st.seg === 'watch') {
+    if (!st.watch.length) { mlist.innerHTML = `<div class="empty"><b>No tokens starred yet</b>Open any token and tap ☆ to follow it here.</div>`; return; }
+    const pairs = await getPairs(st.watch);
+    list = st.watch.map(m => pairs[m]).filter(Boolean);
+  }
+  mlist.innerHTML = list.length ? list.map(tokenRow).join('') : `<div class="empty"><b>Nothing here right now</b>Pull fresh data with the refresh button.</div>`;
+}
+// search
+let qT;
+$('#q').addEventListener('input', e => {
+  clearTimeout(qT);
+  const q = e.target.value.trim();
+  if (!q) { renderMarkets(); return; }
+  qT = setTimeout(() => search(q), 350);
+});
+$('#q').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { const q = e.target.value.trim(); if (ADDR_RE.test(q)) { e.target.blur(); openToken(q); } }
+});
+async function search(q) {
+  mlist.innerHTML = skeleton(5);
+  try {
+    if (ADDR_RE.test(q)) {
+      const pairs = await getPairs([q], true);
+      if (pairs[q]) { mlist.innerHTML = tokenRow(pairs[q]); return; }
+    }
+    const d = await getJSON(`${DS}/latest/dex/search?q=${encodeURIComponent(q)}`);
+    if ($('#q').value.trim() !== q) return;
+    const seen = new Set(), rows = [];
+    for (const p of (d.pairs || []).filter(p => p.chainId === 'solana').sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))) {
+      const m = p.baseToken.address; if (seen.has(m) || QUOTES.has(m)) continue; seen.add(m);
+      pairCache.set(m, { t: Date.now(), p }); rows.push(tokenRow(p));
+    }
+    mlist.innerHTML = rows.length ? rows.join('') : `<div class="empty"><b>No Solana tokens match “${esc(q)}”</b>Try the symbol, name or contract address.</div>`;
+  } catch { mlist.innerHTML = `<div class="empty"><b>Search failed</b>Check your connection.</div>`; }
+}
+$('#segs').addEventListener('click', e => {
+  const b = e.target.closest('[data-seg]'); if (!b) return;
+  st.seg = b.dataset.seg; $$('#segs .chip').forEach(c => c.setAttribute('aria-pressed', c === b));
+  $('#q').value = ''; renderMarkets(); window.scrollTo(0, 0);
+});
+function paintTf() { $$('#tfs .chip').forEach(c => c.setAttribute('aria-pressed', c.dataset.tf === st.s.tf)); }
+$('#tfs').addEventListener('click', e => {
+  const b = e.target.closest('[data-tf]'); if (!b) return;
+  st.s.tf = b.dataset.tf; saveS(); paintTf(); if (!$('#q').value.trim()) renderMarkets();
+});
+$('#refreshBtn').addEventListener('click', () => loadMarkets(false));
+
+/* ---------- sheets ---------- */
+function openSheet(id) { const s = $('#' + id); s.classList.add('open'); s.setAttribute('aria-hidden', 'false'); s.scrollTop = 0; document.body.style.overflow = 'hidden'; }
+function closeSheet(id) {
+  const s = $('#' + id); s.classList.remove('open'); s.setAttribute('aria-hidden', 'true');
+  if (!$$('.sheet.open').length) document.body.style.overflow = '';
+  if (id === 'tokenSheet') setTimeout(() => { if (!s.classList.contains('open')) $('#tBody').innerHTML = ''; }, 300);
+}
+document.addEventListener('click', e => { const c = e.target.closest('[data-close]'); if (c) closeSheet(c.dataset.close); });
+
+/* ---------- Token detail ---------- */
+let curMint = null;
+async function openToken(mint) {
+  curMint = mint;
+  $('#tTitle').innerHTML = `${avatar(st.meta[mint]?.img, st.meta[mint]?.sym)}<div style="min-width:0"><b>${esc(st.meta[mint]?.sym || short(mint))}</b><span>Loading…</span></div>`;
+  $('#tBody').innerHTML = `<div class="list">${skeleton(3)}</div>`;
+  paintStar();
+  openSheet('tokenSheet');
+  const p = (await getPairs([mint], true))[mint];
+  if (curMint !== mint) return;
+  if (!p) { $('#tBody').innerHTML = `<div class="empty"><b>Not on DexScreener yet</b>This token may be too new or have no pool.</div>` + tokenLinks(mint, null); return; }
+  renderToken(p);
+}
+function paintStar() { $('#tStar').setAttribute('aria-pressed', st.watch.includes(curMint)); }
+$('#tStar').addEventListener('click', () => {
+  if (!curMint) return;
+  const i = st.watch.indexOf(curMint);
+  if (i >= 0) { st.watch.splice(i, 1); toast('Removed from watchlist'); } else { st.watch.unshift(curMint); toast('Added to watchlist'); }
+  LS.set('watch', st.watch); paintStar();
+  if (st.seg === 'watch' || st.tab === 'watch') renderMarkets();
+});
+function tokenLinks(mint, p) {
+  const jup = `https://jup.ag/swap/SOL-${mint}`;
+  const phantom = `https://phantom.app/ul/browse/${encodeURIComponent(jup)}?ref=${encodeURIComponent(location.origin)}`;
+  const soc = (p?.info?.websites || []).slice(0, 1).map(w => `<a class="btn" href="${esc(w.url)}" target="_blank" rel="noopener">Website</a>`)
+    .concat((p?.info?.socials || []).slice(0, 3).map(s => `<a class="btn" href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.type === 'twitter' ? 'X' : (s.type || 'Link').replace(/^./, c => c.toUpperCase()))}</a>`));
+  return `
+  <div class="section stack">
+    <div class="btn-row">
+      <a class="btn primary" href="${phantom}" target="_blank" rel="noopener">Buy in Phantom</a>
+      <a class="btn" href="${jup}" target="_blank" rel="noopener">Jupiter</a>
+    </div>
+    <div class="ca"><code>${esc(mint)}</code><button class="btn" style="padding:7px 10px" data-copy="${esc(mint)}">Copy CA</button></div>
+  </div>
+  <div class="section"><h2 class="h">Check before you buy</h2>
+    <div class="links">
+      <a class="btn" href="https://rugcheck.xyz/tokens/${mint}" target="_blank" rel="noopener">RugCheck</a>
+      <a class="btn" href="https://solscan.io/token/${mint}" target="_blank" rel="noopener">Solscan</a>
+      <a class="btn" href="${esc(p?.url || 'https://dexscreener.com/solana/' + mint)}" target="_blank" rel="noopener">DexScreener</a>
+      <a class="btn" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noopener">GMGN</a>
+      ${soc.join('')}
+    </div>
+  </div>`;
+}
+function renderToken(p) {
+  const m = p.baseToken.address, sym = p.baseToken.symbol;
+  $('#tTitle').innerHTML = `${avatar(p.info?.imageUrl, sym)}<div style="min-width:0"><b>${esc(sym)}</b><span>${esc(p.baseToken.name)} · ${esc(p.dexId)}${p.pairCreatedAt ? ' · ' + age(p.pairCreatedAt) + ' old' : ''}</span></div>`;
+  const tfs = [['m5', '5m'], ['h1', '1h'], ['h6', '6h'], ['h24', '24h']].map(([k, l]) => { const c = pct(p.priceChange?.[k]); return `<div class="tf num ${c.c}"><small>${l}</small>${c.t}</div>`; }).join('');
+  const tx = p.txns?.h24 || {}, buys = tx.buys || 0, sells = tx.sells || 0, bp = buys + sells ? (buys / (buys + sells)) * 100 : 50;
+  const tx1 = p.txns?.h1 || {};
+  const embed = `https://dexscreener.com/solana/${p.pairAddress}?embed=1&loadChartSettings=0&trades=0&tabs=0&info=0&chartLeftToolbar=0&chartTheme=dark&theme=dark&chartStyle=1&chartType=usd&interval=5`;
+  const walletHits = Object.values(st.trades).filter(t => t.mint === m).sort((a, b) => b.time - a.time);
+  $('#tBody').innerHTML = `
+    <div class="bigpx num">${fmtPrice(p.priceUsd)}</div>
+    <div class="tfrow">${tfs}</div>
+    <div class="chart"><iframe src="${embed}" title="${esc(sym)} price chart" loading="lazy"></iframe></div>
+    ${walletHits.length ? `<div class="section" style="padding-bottom:0"><h2 class="h">Your tracked wallets on ${esc(sym)}</h2></div><div>${walletHits.slice(0, 10).map(tradeRow).join('')}</div>` : ''}
+    <div class="section"><div class="stats num">
+      <div class="stat"><small>Mkt cap</small><b>${fmtUsd(p.marketCap || p.fdv)}</b></div>
+      <div class="stat"><small>Liquidity</small><b>${fmtUsd(p.liquidity?.usd)}</b></div>
+      <div class="stat"><small>FDV</small><b>${fmtUsd(p.fdv)}</b></div>
+      <div class="stat"><small>Vol 1h</small><b>${fmtUsd(p.volume?.h1)}</b></div>
+      <div class="stat"><small>Vol 24h</small><b>${fmtUsd(p.volume?.h24)}</b></div>
+      <div class="stat"><small>Txns 1h</small><b><span class="up">${tx1.buys || 0}</span>/<span class="down">${tx1.sells || 0}</span></b></div>
+    </div>
+    <div class="card" style="margin-top:8px">
+      <div class="kv num"><span>24h buys vs sells</span><span><span class="up">${buys}</span> / <span class="down">${sells}</span></span></div>
+      <div class="bs"><i style="width:${bp.toFixed(1)}%"></i></div>
+    </div></div>
+    ${tokenLinks(m, p)}`;
+}
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-copy]'); if (c) { e.stopPropagation(); copy(c.dataset.copy); return; }
+  const tk = e.target.closest('[data-track]'); if (tk) { e.stopPropagation(); toggleTrack(tk.dataset.track); return; }
+  const tr = e.target.closest('[data-trader]'); if (tr) { openTrader(tr.dataset.trader); return; }
+  const r = e.target.closest('[data-mint]'); if (r) { openToken(r.dataset.mint); return; }
+  const w = e.target.closest('[data-wallet]'); if (w) { openWallet(w.dataset.wallet); return; }
+  const g = e.target.closest('[data-goto]'); if (g) { setTab(g.dataset.goto); }
+});
+
+/* ---------- server connection ---------- */
+const connected = () => !!(st.s.conn && st.s.conn.u && st.s.conn.p);
+function parseCode(code) {
+  code = String(code || '').trim().replace(/^.*#connect=/, '');
+  try {
+    const b = code.replace(/-/g, '+').replace(/_/g, '/');
+    const o = JSON.parse(atob(b + '='.repeat((4 - b.length % 4) % 4)));
+    if (o.u && o.p && /^https:\/\//.test(o.u)) return { u: o.u.replace(/\/+$/, ''), p: o.p };
+  } catch {}
+  return null;
+}
+async function srv(path, body) {
+  if (!connected()) throw new Error('NOKEY');
+  let r;
+  try {
+    r = await fetch(st.s.conn.u + path, body === undefined
+      ? { headers: { 'x-pass': st.s.conn.p } }
+      : { method: 'POST', headers: { 'x-pass': st.s.conn.p, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  } catch { throw new Error("Can't reach your server. Check your connection."); }
+  if (r.status === 401) throw new Error('Wrong connection code. Paste it again in Settings.');
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Server error ' + r.status);
+  return d;
+}
+
+/* ---------- wallet engine ---------- */
+const wOf = a => st.wallets.find(w => w.addr === a);
+const wColor = a => WCOLORS[Math.max(0, st.wallets.findIndex(w => w.addr === a)) % WCOLORS.length];
+const wName = a => wOf(a)?.label || st.ids[a]?.name || short(a);
+let polling = false, firstLoad = true;
+function setSync(state, text) {
+  const s = $('#sync'); s.classList.toggle('live', state === 'live');
+  $('#pollBtn').classList.toggle('spin', state === 'busy');
+  s.lastElementChild.textContent = text;
+}
+function applyState(d) {
+  st.wallets = d.wallets || []; LS.set('wallets', st.wallets);
+  st.server = { paused: d.paused, autoOn: d.autoOn, autoN: d.autoN, minSol: d.minSol };
+  for (const w of st.wallets) if (w.tw && !st.ids[w.addr]) st.ids[w.addr] = { name: w.label, tw: w.tw, av: '' };
+  const fresh = [];
+  const next = {};
+  for (const t of d.trades || []) {
+    next[t.key] = t;
+    if (!st.trades[t.key]) fresh.push(t);
+    if (t.sym && !st.meta[t.mint]) st.meta[t.mint] = { sym: t.sym, name: t.sym, img: t.img || '' };
+  }
+  st.trades = next;
+  LS.set('trades', st.trades); LS.set('meta', st.meta);
+  return fresh;
+}
+async function pollAll() {
+  if (polling) return;
+  if (!connected()) { setSync('idle', 'Not connected'); renderWallets(); return; }
+  polling = true; setSync('busy', 'Updating…');
+  try {
+    const fresh = applyState(await srv('/api/state'));
+    setSync('live', 'Live · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    const alerts = firstLoad ? [] : fresh.filter(passesMin);
+    firstLoad = false;
+    if (alerts.length) {
+      const t = alerts[0];
+      toast(`${wName(t.wallet)} ${t.side === 'BUY' ? 'bought' : 'sold'} ${st.meta[t.mint]?.sym || short(t.mint)}${alerts.length > 1 ? ` (+${alerts.length - 1} more)` : ''}`);
+      if (st.tab !== 'wallets') { st.unseen += alerts.length; paintBadge(); }
+    }
+  } catch (e) { setSync('err', 'Offline'); if (e.message !== 'NOKEY') toast(e.message); }
+  polling = false;
+  renderWallets();
+}
+async function walletOp(body, okMsg) {
+  try {
+    const d = await srv('/api/wallets', body);
+    if (d.wallets) { st.wallets = d.wallets; LS.set('wallets', st.wallets); }
+    toast(d.ok === false ? 'Saved, but the live feed update failed: ' + (d.error || '') : okMsg);
+    renderWallets(); return true;
+  } catch (e) { toast(e.message === 'NOKEY' ? 'Connect the app in Settings first' : e.message); return false; }
+}
+const passesMin = t => t.quote !== 'SOL' || t.amount >= st.s.minSol;
+function paintBadge() { const b = $('#badge'); b.hidden = !st.unseen; b.textContent = st.unseen > 99 ? '99+' : st.unseen; }
+function tradeRow(t) {
+  const meta = st.meta[t.mint] || {}, pc = pairCache.get(t.mint)?.p;
+  const amt = t.quote === 'SOL' ? `${t.amount.toFixed(t.amount >= 10 ? 1 : 2)} SOL` : fmtUsd(t.amount);
+  return `<button class="trade" data-mint="${esc(t.mint)}">
+    <span class="side ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span>
+    <span class="rmain"><span class="sym">${esc(meta.sym || short(t.mint))}${t.side === 'BUY' && t.pre <= 0 ? ' <span class="tag new">NEW</span>' : ''}${t.side === 'SELL' && t.post <= t.pre * 0.01 ? ' <span class="tag">EXIT</span>' : ''}</span>
+      <span class="sub"><span style="color:${wColor(t.wallet)}">●</span> ${esc(wName(t.wallet))} · ${ago(t.time)}</span></span>
+    <span class="rright num"><span class="px">${amt}</span><span class="sub">${pc ? 'MC ' + fmtUsd(pc.marketCap || pc.fdv) : ''}</span></span>
+  </button>`;
+}
+function renderWallets() {
+  $('#noKey').hidden = connected();
+  $('#wchips').innerHTML = st.wallets.map(w => {
+    const n = Object.values(st.trades).filter(t => t.wallet === w.addr).length;
+    return `<button class="wchip" data-wallet="${esc(w.addr)}"><span class="dot" style="background:${wColor(w.addr)}"></span>${w.auto ? '⭐ ' : ''}${esc(w.label || short(w.addr))}<span class="tag">${n}</span></button>`;
+  }).join('') + `<button class="wchip add" id="addOpen">＋ Add wallet</button>`;
+  $('#addOpen').onclick = () => { $('#addForm').hidden = false; $('#addAddr').focus(); };
+
+  const trades = Object.values(st.trades).filter(t => wOf(t.wallet)).sort((a, b) => b.time - a.time);
+  // clusters: 2+ tracked wallets bought same token within 60 min
+  const now = Date.now() / 1000, groups = {};
+  for (const t of trades) if (t.side === 'BUY' && now - t.time < 3600) (groups[t.mint] = groups[t.mint] || new Set()).add(t.wallet);
+  const cl = Object.entries(groups).filter(([, s]) => s.size >= 2);
+  $('#clusters').innerHTML = cl.map(([m, s]) => `<button class="cluster" data-mint="${esc(m)}">
+      <span class="t">🔥 CLUSTER BUY · ${s.size} WALLETS IN 1H</span>
+      <span class="sym">${esc(st.meta[m]?.sym || short(m))}</span>
+      <span class="sub">${[...s].map(a => esc(wName(a))).join(', ')}</span></button>`).join('');
+  $('#clusters').hidden = !cl.length;
+
+  const shown = trades.filter(t => (st.feedF === 'all' || t.side === st.feedF) && passesMin(t));
+  let empty;
+  if (!connected()) empty = '';
+  else if (!st.wallets.length) empty = `<div class="empty"><b>No wallets tracked yet</b>Turn on auto-track in Settings, tap “+ Track” in Leaders, or add a wallet here.</div>`;
+  else empty = `<div class="empty"><b>No trades yet</b>Every buy and sell from your tracked traders lands here and in Telegram, even while the app is closed.</div>`;
+  $('#feed').innerHTML = shown.length ? shown.slice(0, 150).map(tradeRow).join('') : empty;
+}
+$('#feedSegs').addEventListener('click', e => {
+  const b = e.target.closest('[data-f]'); if (!b) return;
+  st.feedF = b.dataset.f; $$('#feedSegs .chip').forEach(c => c.setAttribute('aria-pressed', c === b)); renderWallets();
+});
+$('#pollBtn').addEventListener('click', () => { if (!connected()) { setTab('settings'); toast('Connect the app first'); } else pollAll(); });
+$('#addCancel').addEventListener('click', () => { $('#addForm').hidden = true; });
+$('#addForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const a = $('#addAddr').value.trim(), l = $('#addLabel').value.trim();
+  if (!ADDR_RE.test(a)) { toast("That doesn't look like a Solana address"); return; }
+  if (wOf(a) && !wOf(a).auto) { toast('Already tracking this wallet'); return; }
+  if (await walletOp({ op: 'add', addr: a, label: l || st.ids[a]?.name || '' }, 'Tracking ' + (l || short(a)))) {
+    $('#addAddr').value = ''; $('#addLabel').value = ''; $('#addForm').hidden = true;
+  }
+});
+
+/* ---------- wallet detail ---------- */
+let curWallet = null;
+function openWallet(addr) {
+  curWallet = addr;
+  const w = wOf(addr); if (!w) return;
+  const trades = Object.values(st.trades).filter(t => t.wallet === addr).sort((a, b) => b.time - a.time);
+  let inSol = 0, outSol = 0;
+  for (const t of trades) if (t.quote === 'SOL') { if (t.side === 'BUY') outSol += t.amount; else inSol += t.amount; }
+  const net = inSol - outSol;
+  $('#wTitle').innerHTML = `<span class="av" style="background:${wColor(addr)};color:#111">${esc((w.label || '?').slice(0, 2).toUpperCase())}</span><div style="min-width:0"><b>${esc(w.label)}</b><span class="mono">${short(addr)}</span></div>`;
+  $('#wBody').innerHTML = `
+    <div class="section stack">
+      <div class="ca"><code>${esc(addr)}</code><button class="btn" style="padding:7px 10px" data-copy="${esc(addr)}">Copy</button></div>
+      <div class="btn-row">
+        <a class="btn" href="https://gmgn.ai/sol/address/${addr}" target="_blank" rel="noopener">GMGN</a>
+        <a class="btn" href="https://solscan.io/account/${addr}" target="_blank" rel="noopener">Solscan</a>
+        <a class="btn" href="https://birdeye.so/profile/${addr}?chain=solana" target="_blank" rel="noopener">Birdeye</a>
+      </div>
+      <button class="btn primary block" data-trader="${esc(addr)}">Profit &amp; positions</button>
+    </div>
+    <div class="section"><h2 class="h">In your feed</h2>
+      <div class="card num">
+        <div class="kv"><span>Swaps seen</span><span>${trades.length}</span></div>
+        <div class="kv"><span>SOL spent on buys</span><span>${outSol.toFixed(2)}</span></div>
+        <div class="kv"><span>SOL received from sells</span><span>${inSol.toFixed(2)}</span></div>
+        <div class="kv"><span>Net SOL flow</span><span class="${net >= 0 ? 'up' : 'down'}">${net >= 0 ? '+' : ''}${net.toFixed(2)}</span></div>
+      </div>
+      <p class="note">Net flow doesn't count tokens still held, so an open position shows as negative until it's sold.</p>
+    </div>
+    <div class="section"><h2 class="h">Holdings now</h2><div class="card" id="holds"><div class="note">Loading holdings…</div></div></div>
+    <div class="section" style="padding-bottom:0"><h2 class="h">Recent swaps</h2></div>
+    <div>${trades.slice(0, 40).map(tradeRow).join('') || '<div class="empty">No swaps seen yet.</div>'}</div>
+    <div class="section stack">
+      <h2 class="h">Edit</h2>
+      <div class="btn-row"><input id="wRename" value="${esc(w.label)}" aria-label="Wallet name" style="flex:2"><button class="btn" id="wRenameBtn" style="flex:1">Rename</button></div>
+      <button class="btn danger block" id="wRemove">Stop tracking this wallet</button>
+    </div>`;
+  openSheet('walletSheet');
+  $('#wRenameBtn').onclick = async () => { const l = $('#wRename').value.trim(); if (l && await walletOp({ op: 'rename', addr, label: l }, 'Renamed')) openWallet(addr); };
+  $('#wRemove').onclick = async function () {
+    if (this.dataset.armed !== '1') { this.dataset.armed = '1'; this.textContent = 'Tap again to confirm'; setTimeout(() => { if (this.isConnected) { this.dataset.armed = ''; this.textContent = 'Stop tracking this wallet'; } }, 3000); return; }
+    if (await walletOp({ op: 'remove', addr }, 'Wallet removed')) closeSheet('walletSheet');
+  };
+  loadHoldings(addr);
+}
+async function loadHoldings(addr) {
+  const box = () => (curWallet === addr ? $('#holds') : null);
+  try {
+    const d = await stGet(`/v2/pnl/wallets/${addr}/positions?sort=value&direction=desc&limit=15`);
+    const el = box(); if (el) el.innerHTML = posList((d.positions || []).filter(x => (x.current?.value || 0) >= 1), 'hold');
+  } catch (e) { const el = box(); if (el) el.innerHTML = `<div class="note">${esc(stErrMsg(e) || 'Connect the app in Settings to see holdings.')}</div>`; }
+}
+
+/* ---------- settings ---------- */
+function paintSettings() {
+  $('#sPoll').value = String(st.s.poll); $('#sMin').value = String(st.s.minSol);
+  $('#sConnState').textContent = connected() ? '🟢 Connected' : 'Not connected';
+  $('#sConnState').className = connected() ? 'up' : '';
+  $('#sConnect').textContent = connected() ? 'Reconnect' : 'Connect';
+  const sv = st.server;
+  $('#sServer').hidden = !connected() || !sv;
+  if (sv) {
+    $('#sAuto').value = sv.autoOn ? 'on' : 'off';
+    $('#sAutoN').value = String([5, 10, 15, 20, 30].includes(sv.autoN) ? sv.autoN : 10);
+    $('#sSrvMin').value = String([0, 0.1, 0.5, 1, 5].includes(sv.minSol) ? sv.minSol : 0.1);
+    $('#sPaused').value = sv.paused ? 'paused' : 'on';
+  }
+}
+async function connectWith(code, quiet) {
+  const c = parseCode(code);
+  if (!c) { toast("That code isn't complete. Copy it again from Telegram."); return false; }
+  const prev = st.s.conn; st.s.conn = c;
+  try {
+    applyState(await srv('/api/state'));
+    saveS(); stMem.clear(); LS.set('stc', {}); firstLoad = false;
+    if (!quiet) toast('Connected ✓ Tracking ' + st.wallets.length + ' wallets');
+    paintSettings(); renderWallets(); return true;
+  } catch (e) { st.s.conn = prev; toast(e.message); return false; }
+}
+$('#sConnect').onclick = async () => {
+  $('#sConnect').textContent = 'Connecting…';
+  if (await connectWith($('#sCode').value)) $('#sCode').value = '';
+  paintSettings();
+};
+$('#sSrvSave').onclick = async () => {
+  $('#sSrvSave').textContent = 'Saving…';
+  try {
+    const d = await srv('/api/settings', { autoOn: $('#sAuto').value === 'on', autoN: +$('#sAutoN').value, minSol: +$('#sSrvMin').value, paused: $('#sPaused').value === 'paused' });
+    toast(d.ok === false ? 'Saved with a warning: ' + (d.error || '') : 'Alert settings saved ✓');
+    await pollAll(); paintSettings();
+  } catch (e) { toast(e.message); }
+  $('#sSrvSave').textContent = 'Save alert settings';
+};
+$('#sPoll').onchange = e => { st.s.poll = +e.target.value; saveS(); schedulePoll(); };
+$('#sMin').onchange = e => { st.s.minSol = +e.target.value; saveS(); renderWallets(); };
+
+/* ---------- Solana Tracker (leaderboard + PnL) ---------- */
+const stMem = new Map();
+async function stGet(path, ttlMin = 10) {
+  if (!connected()) throw new Error('NOKEY');
+  const cache = LS.get('stc', {}), hit = stMem.get(path) || cache[path];
+  if (hit && Date.now() - hit.t < ttlMin * 60000) return hit.v;
+  let r;
+  try { r = await fetch(st.s.conn.u + '/api/st' + path, { headers: { 'x-pass': st.s.conn.p } }); }
+  catch { throw new Error("Can't reach your server. Check your connection."); }
+  if (r.status === 401) throw new Error('Wrong connection code. Paste it again in Settings.');
+  if (r.status === 429) throw new Error('Solana Tracker free limit reached for now. Try again later.');
+  if (!r.ok) throw new Error('Trader data unavailable (' + r.status + ')');
+  const v = await r.json();
+  stMem.set(path, { t: Date.now(), v });
+  if (path.includes('/leaderboard')) {
+    cache[path] = { t: Date.now(), v };
+    const keys = Object.keys(cache); if (keys.length > 12) delete cache[keys[0]];
+    LS.set('stc', cache);
+  }
+  return v;
+}
+function stErrMsg(e) {
+  if (e.message === 'NOKEY') return '';
+  return e.message;
+}
+const ms = t => (t && t < 1e12 ? t * 1000 : t);
+function roiOf(o) { const inv = +o.invested, tot = +(o.pnl?.total ?? o.pnl?.realized); if (inv > 0 && isFinite(tot)) return (tot / inv) * 100; return o.roi != null && isFinite(o.roi) ? +o.roi : null; }
+const fmtRoi = r => (r == null ? '—' : (r > 0 ? '+' : '') + (Math.abs(r) >= 1000 ? Math.round(r).toLocaleString('en-US') : Math.round(r)) + '%');
+const winPct = v => (v == null || !isFinite(v) ? '—' : Math.round(v <= 1 ? v * 100 : v) + '%');
+function fmtSigned(n) { n = +n; if (!isFinite(n)) return '—'; return (n >= 0 ? '+' : '−') + fmtUsd(Math.abs(n)).replace('—', '$0'); }
+function rememberIds(rows) {
+  let ch = false;
+  for (const t of rows) if (t.wallet && t.identity?.name) { st.ids[t.wallet] = { name: t.identity.name, tw: t.identity.twitter || '', av: t.identity.avatar || '' }; ch = true; }
+  if (ch) LS.set('ids', st.ids);
+}
+function tavatar(w) { const id = st.ids[w]; return avatar(id?.av, id?.name || w); }
+function twHandle(tw) { if (!tw) return ''; const h = String(tw).replace(/^https?:\/\/(www\.)?(x|twitter)\.com\//i, '').replace(/^@/, '').split(/[/?]/)[0]; return h; }
+
+let lbBusy = false;
+async function loadLeaders(force) {
+  const box = $('#lblist');
+  $('#lbNoKey').hidden = connected();
+  if (!connected()) { box.innerHTML = ''; return; }
+  if (lbBusy) return; lbBusy = true;
+  $('#lbRefresh').classList.add('spin');
+  if (!st.lbRows.length || force !== 'soft') box.innerHTML = skeleton(8);
+  const kind = st.lbKind, days = st.lbDays;
+  const path = kind === 'kols'
+    ? `/v2/pnl/leaderboard/kols/period?period=${days}d&sort=realized&direction=desc&limit=50`
+    : `/v2/pnl/leaderboard/top?days=${days}&sort=realized&direction=desc&limit=50&minTrades=5&excludeArbitrage=true`;
+  try {
+    if (force === true) { stMem.delete(path); const c = LS.get('stc', {}); delete c[path]; LS.set('stc', c); }
+    const d = await stGet(path, 5);
+    const rows = d.traders || d.data || (Array.isArray(d) ? d : []);
+    rememberIds(rows);
+    st.lbRows = rows;
+    if (kind !== st.lbKind || days !== st.lbDays) return;
+    box.innerHTML = rows.length ? rows.map(leaderRow).join('') :
+      `<div class="empty"><b>No traders returned</b>Try another period.<br><small class="mono">${esc(JSON.stringify(d).slice(0, 160))}</small></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty"><b>Couldn't load the leaderboard</b>${esc(stErrMsg(e))}</div>`;
+  } finally { lbBusy = false; $('#lbRefresh').classList.remove('spin'); }
+}
+function leaderRow(t, i) {
+  const w = t.wallet, id = t.identity || {}, name = id.name || short(w), h = twHandle(id.twitter);
+  const pnl = t.period?.realized ?? t.day?.realized ?? t.pnl?.realized;
+  const vol = t.period?.volume ?? t.day?.volume;
+  const wr = t.period?.days?.winRate ?? t.winRate;
+  const tracked = !!wOf(w);
+  const extra = [vol != null ? 'Vol ' + fmtUsd(vol) : '', t.period?.tradingDays > 1 ? t.period.tradingDays + ' active days' : '', wr != null ? 'Win ' + winPct(wr) : ''].filter(Boolean).join(' · ');
+  return `<button class="lrow" data-trader="${esc(w)}">
+    <span class="rank num ${i < 3 ? 'top3' : ''}">${i + 1}</span>
+    ${avatar(id.avatar, name)}
+    <span class="rmain"><span class="sym">${esc(name)}${h ? ` <span class="handle">@${esc(h)}</span>` : ''}</span><span class="sub num">${esc(extra || short(w))}</span></span>
+    <span class="rright num"><span class="pnl ${+pnl >= 0 ? 'up' : 'down'}">${fmtSigned(pnl)}</span><span class="trk ${tracked ? 'on' : ''}" data-track="${esc(w)}">${tracked ? '✓ Tracking' : '+ Track'}</span></span>
+  </button>`;
+}
+async function toggleTrack(w) {
+  if (wOf(w) && !wOf(w).auto) { openWallet(w); return; }
+  const id = st.ids[w];
+  if (await walletOp({ op: 'add', addr: w, label: id?.name || '', tw: twHandle(id?.tw) }, `Tracking ${id?.name || short(w)}. Alerts go to Telegram 24/7`)) {
+    $$(`[data-track="${CSS.escape(w)}"]`).forEach(b => { b.classList.add('on'); b.textContent = '✓ Tracking'; });
+  }
+}
+$('#lbKinds').addEventListener('click', e => {
+  const b = e.target.closest('[data-lb]'); if (!b) return;
+  st.lbKind = b.dataset.lb; $$('#lbKinds .chip').forEach(c => c.setAttribute('aria-pressed', c === b)); loadLeaders(false);
+});
+$('#lbPeriods').addEventListener('click', e => {
+  const b = e.target.closest('[data-p]'); if (!b) return;
+  st.lbDays = +b.dataset.p; $$('#lbPeriods .chip').forEach(c => c.setAttribute('aria-pressed', c === b)); loadLeaders(false);
+});
+$('#lbRefresh').addEventListener('click', () => loadLeaders(true));
+
+let curTrader = null;
+async function openTrader(w) {
+  curTrader = w;
+  const id = st.ids[w] || {}, lb = st.lbRows.find(t => t.wallet === w);
+  const name = id.name || wOf(w)?.label || short(w), h = twHandle(id.tw);
+  $('#trTitle').innerHTML = `${tavatar(w)}<div style="min-width:0"><b>${esc(name)}</b><span>${h ? '@' + esc(h) + ' · ' : ''}<span class="mono">${short(w)}</span></span></div>`;
+  const periodLbl = st.lbDays === 1 ? 'last 24h' : `last ${st.lbDays} days`;
+  const lbP = lb ? (lb.period?.realized ?? lb.day?.realized) : null;
+  $('#trBody').innerHTML = `
+    ${lbP != null ? `<div class="hero"><small>Profit, ${periodLbl}</small><b class="num ${+lbP >= 0 ? 'up' : 'down'}">${fmtSigned(lbP)}</b></div>` : ''}
+    <div class="section stack">
+      <div class="btn-row">
+        <button class="btn ${wOf(w) ? '' : 'primary'}" data-track="${esc(w)}">${wOf(w) ? '✓ Tracking live' : '+ Track live buys & sells'}</button>
+      </div>
+      <div class="btn-row">
+        ${h ? `<a class="btn" href="https://x.com/${encodeURIComponent(h)}" target="_blank" rel="noopener">X profile</a>` : ''}
+        <a class="btn" href="https://gmgn.ai/sol/address/${w}" target="_blank" rel="noopener">GMGN</a>
+        <a class="btn" href="https://solscan.io/account/${w}" target="_blank" rel="noopener">Solscan</a>
+        <button class="btn" data-copy="${esc(w)}">Copy</button>
+      </div>
+    </div>
+    <div class="section"><h2 class="h">All-time record</h2><div class="card" id="trSum"><div class="note">Loading…</div></div></div>
+    <div class="section"><h2 class="h">Latest moves</h2><div class="card" id="trRecent"><div class="note">Loading…</div></div></div>
+    <div class="section"><h2 class="h">Holding now</h2><div class="card" id="trHold"><div class="note">Loading…</div></div></div>`;
+  openSheet('traderSheet');
+  if (!connected()) { for (const s of ['#trSum', '#trRecent', '#trHold']) $(s).innerHTML = '<div class="note">Connect the app in Settings to see profit and positions.</div>'; return; }
+  const alive = () => curTrader === w;
+  stGet(`/v2/pnl/wallets/${w}`).then(d => {
+    if (!alive()) return;
+    if (d.identity?.name) { rememberIds([{ wallet: w, identity: d.identity }]); }
+    const p = d.pnl || {}, tk = d.tokens || {}, c = d.counts || {};
+    $('#trSum').innerHTML = `<div class="num">
+      <div class="kv"><span>Total profit</span><b class="${+p.total >= 0 ? 'up' : 'down'}">${fmtSigned(p.total)}</b></div>
+      <div class="kv"><span>Realized (sold)</span><span class="${+p.realized >= 0 ? 'up' : 'down'}">${fmtSigned(p.realized)}</span></div>
+      <div class="kv"><span>Unrealized (still held)</span><span class="${+p.unrealized >= 0 ? 'up' : 'down'}">${fmtSigned(p.unrealized)}</span></div>
+      <div class="kv"><span>Win rate</span><span>${winPct(d.winRate)} · ${tk.profitable ?? '—'} won / ${tk.losing ?? '—'} lost</span></div>
+      <div class="kv"><span>Return on money in</span><span>${fmtRoi(roiOf(d))}</span></div>
+      <div class="kv"><span>Trades</span><span>${(c.trades ?? 0).toLocaleString('en-US')} on ${c.tokensTraded ?? '—'} tokens</span></div>
+      <div class="kv"><span>Last trade</span><span>${d.timing?.lastTrade ? ago(ms(d.timing.lastTrade) / 1000) : '—'}</span></div></div>`;
+  }).catch(e => { if (alive()) $('#trSum').innerHTML = `<div class="note">${esc(stErrMsg(e) || 'Unavailable')}</div>`; });
+  stGet(`/v2/pnl/wallets/${w}/positions?sort=last_trade&direction=desc&limit=12`).then(d => {
+    if (!alive()) return;
+    $('#trRecent').innerHTML = posList(d.positions || [], 'recent');
+  }).catch(e => { if (alive()) $('#trRecent').innerHTML = `<div class="note">${esc(stErrMsg(e) || 'Unavailable')}</div>`; });
+  stGet(`/v2/pnl/wallets/${w}/positions?sort=value&direction=desc&limit=12`).then(d => {
+    if (!alive()) return;
+    $('#trHold').innerHTML = posList((d.positions || []).filter(x => (x.current?.value || 0) >= 1), 'hold');
+  }).catch(e => { if (alive()) $('#trHold').innerHTML = `<div class="note">${esc(stErrMsg(e) || 'Unavailable')}</div>`; });
+}
+function posList(list, mode) {
+  if (!list.length) return `<div class="note">${mode === 'hold' ? 'Not holding any token worth over $1.' : 'No trades found.'}</div>`;
+  return list.map(x => {
+    const m = x.meta || {}, sym = m.symbol || short(x.token || '');
+    const t = x.timing || {}, lb = ms(t.lastBuy), ls = ms(t.lastSell);
+    let line, right, cls;
+    if (mode === 'hold') {
+      line = `Worth ${fmtUsd(x.current?.value)} · MC ${fmtUsd(m.marketCap)}`;
+      right = fmtSigned(x.pnl?.unrealized); cls = +x.pnl?.unrealized >= 0 ? 'up' : 'down';
+    } else {
+      const sold = ls && (!lb || ls >= lb);
+      const bits = [];
+      if (lb) bits.push(`<span class="up">Bought ${age(lb)} ago</span>`);
+      if (ls) bits.push(`<span class="down">Sold ${age(ls)} ago</span>`);
+      line = bits.join(' · ') + ((x.current?.value || 0) >= 1 ? ' · still holding' : sold ? ' · exited' : '');
+      const tot = x.pnl?.total ?? x.pnl?.realized; right = fmtSigned(tot); cls = +tot >= 0 ? 'up' : 'down';
+    }
+    return `<button class="pos" data-mint="${esc(x.token)}">${avatar(m.image || m.logo, sym)}
+      <span class="rmain"><span class="sym" style="font-size:15px">${esc(sym)}</span><span class="sub num">${line}</span></span>
+      <span class="rright num"><span class="px ${cls}">${right}</span><span class="sub">${roiOf(x) != null ? 'ROI ' + fmtRoi(roiOf(x)) : ''}</span></span></button>`;
+  }).join('');
+}
+/* ---------- tabs ---------- */
+const VIEWS = { markets: 'v-markets', watch: 'v-markets', leaders: 'v-leaders', wallets: 'v-wallets', settings: 'v-settings' };
+function setTab(tab) {
+  st.tab = tab;
+  $$('.tab').forEach(t => t.setAttribute('aria-selected', t.dataset.tab === tab));
+  for (const id of new Set(Object.values(VIEWS))) $('#' + id).hidden = id !== VIEWS[tab];
+  if (tab === 'watch' || tab === 'markets') {
+    const seg = tab === 'watch' ? 'watch' : (st.seg === 'watch' ? 'trending' : st.seg);
+    st.seg = seg; $$('#segs .chip').forEach(c => c.setAttribute('aria-pressed', c.dataset.seg === seg));
+    $('#q').value = ''; renderMarkets();
+  }
+  if (tab === 'wallets') { st.unseen = 0; paintBadge(); renderWallets(); }
+  if (tab === 'settings') paintSettings();
+  if (tab === 'leaders') loadLeaders(false);
+  window.scrollTo(0, 0);
+}
+$('.tabs').addEventListener('click', e => { const t = e.target.closest('[data-tab]'); if (t) setTab(t.dataset.tab); });
+
+/* ---------- timers ---------- */
+let pollTimer, mktTimer;
+function schedulePoll() { clearInterval(pollTimer); pollTimer = setInterval(() => { if (!document.hidden) pollAll(); }, st.s.poll * 1000); }
+mktTimer = setInterval(() => { if (!document.hidden && (st.tab === 'markets' || st.tab === 'watch') && !$('#q').value.trim()) loadMarkets(false); }, 45000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadMarkets(false); pollAll(); } });
+
+/* ---------- boot ---------- */
+paintTf();
+renderWallets();
+setSync('idle', connected() ? 'Starting…' : 'Not connected');
+(async () => {
+  const h = location.hash;
+  if (h.startsWith('#connect=')) {
+    history.replaceState(null, '', location.pathname);
+    if (await connectWith(h.slice(9))) setTab('wallets');
+  }
+})();
+loadMarkets(true);
+schedulePoll();
+setTimeout(pollAll, 800);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "SolRadar",
+  "short_name": "SolRadar",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0A0E17",
+  "theme_color": "#0A0E17",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

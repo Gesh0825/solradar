@@ -1,0 +1,12 @@
+name = "solradar"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "KV_ID_PLACEHOLDER"
+
+[triggers]
+# 08:00, 14:00, 20:00 and 02:00 Mauritius time: refresh famous traders (08:00 also sends the morning leaderboard)
+crons = ["0 4,10,16,22 * * *"]
