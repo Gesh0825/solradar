@@ -1,3 +1,5 @@
+import { DurableObject } from 'cloudflare:workers';
+
 // SolRadar server — Cloudflare Worker (free plan)
 // Helius pushes every trade from your tracked wallets here the moment it happens.
 // This worker turns it into a Telegram alert, keeps the live feed for the app,
@@ -16,7 +18,7 @@ const ST = 'https://data.solanatracker.io';
 const DS = 'https://api.dexscreener.com';
 const MAX_TRADES = 300;
 const CLUSTER_WINDOW = 3600;      // seconds
-const MAX_KV_WRITES = 900;        // free plan allows 1,000/day
+const MAX_KV_WRITES = 50000;      // Durable Object storage: 100,000 free writes/day
 const BOT_TRADES_PER_DAY = 300;   // auto wallets above this are dropped
 
 const DEFAULT_CFG = { wallets: [], paused: false, autoOn: true, autoN: 10, minSol: 0.1, hookId: '', url: '', appUrl: '' };
@@ -56,6 +58,25 @@ function safeEq(a, b) {
 }
 
 // ---------------------------------------------------------------- storage
+// Data lives in a Durable Object (100,000 free writes/day). Cloudflare KV's free plan only
+// allows 1,000 writes/day shared by all your Cloudflare projects, which ran out.
+// Old KV data (binding OLDKV) is read once as a fallback so nothing is lost.
+export class Store extends DurableObject {
+  async getv(k) { const v = await this.ctx.storage.get(k); return v === undefined ? null : v; }
+  async putv(k, v) { await this.ctx.storage.put(k, v); }
+}
+function storage(env) {
+  const stub = env.STORE.get(env.STORE.idFromName('main'));
+  return {
+    async get(k, type) {
+      let v = await stub.getv(k);
+      if (v == null && env.OLDKV) { v = await env.OLDKV.get(k).catch(() => null); if (v != null) await stub.putv(k, v); }
+      if (v == null) return null;
+      return type === 'json' ? JSON.parse(v) : v;
+    },
+    put: (k, v) => stub.putv(k, v),
+  };
+}
 async function getCfg(env) { return { ...DEFAULT_CFG, ...((await env.KV.get('cfg', 'json')) || {}) }; }
 async function putCfg(env, cfg) { await env.KV.put('cfg', JSON.stringify(cfg)); }
 async function getState(env) {
@@ -644,9 +665,14 @@ async function copyBuy(env, mint, info, buyers) {
   await putCopy(env, c);
   try {
     const r = await swap(env, WSOL, mint, spend);
-    const c2 = await getCopy(env);
-    c2.pos[mint] = { sym: info.sym, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
-    await putCopy(env, c2);
+    try {
+      const c2 = await getCopy(env);
+      c2.pos[mint] = { sym: info.sym, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
+      await putCopy(env, c2);
+    } catch (e) {
+      await send(env, `🚨 <b>Bought $${sym} but couldn't save the trade</b> (${esc(e.message)}). The bot won't auto-sell it: sell it yourself in Phantom (SolRadar Bot wallet).\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
+      return;
+    }
     await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${marketLine(info)}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${info.url}">Chart</a>`);
   } catch (e) {
     const c2 = await getCopy(env); delete c2.pos[mint]; await putCopy(env, c2);
@@ -754,6 +780,7 @@ function cleanEnv(env) {
 export default {
   async fetch(req, env, ctx) {
     env = cleanEnv(env);
+    env.KV = storage(env);
     const url = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     try {
@@ -785,6 +812,7 @@ export default {
   },
   async scheduled(event, env, ctx) {
     env = cleanEnv(env);
+    env.KV = storage(env);
     if (event.cron === '* * * * *') { ctx.waitUntil(copyMonitor(env).catch(e => console.log('monitor', e.message))); return; }
     ctx.waitUntil((async () => {
       await autoRefresh(env, true).catch(e => console.log('auto', e.message));

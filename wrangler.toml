@@ -3,9 +3,19 @@ main = "worker.js"
 compatibility_date = "2026-09-01"
 workers_dev = true
 
+# Old storage (read once to move your data over)
 [[kv_namespaces]]
-binding = "KV"
+binding = "OLDKV"
 id = "KV_ID_PLACEHOLDER"
+
+# Main storage: a Durable Object (100,000 free writes/day)
+[[durable_objects.bindings]]
+name = "STORE"
+class_name = "Store"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Store"]
 
 [triggers]
 # every minute: manage open copy trades (take profit, stop loss, time limit)
