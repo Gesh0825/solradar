@@ -16,6 +16,9 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       APP_PASSCODE: ${{ secrets.APP_PASSCODE }}
+      CF_ACCOUNT_SECRET: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TRADER_PRIVATE_KEY: ${{ secrets.TRADER_PRIVATE_KEY }}
+      JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +39,19 @@ jobs:
         run: |
           CF=https://api.cloudflare.com/client/v4
           H="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-          A=$(curl -sS -H "$H" "$CF/accounts" | jq -r '.result[0].id // empty')
-          if [ -z "$A" ]; then echo "::error::The Cloudflare token can't see your account. Create it with the 'Edit Cloudflare Workers' template."; exit 1; fi
+          A="$(echo "$CF_ACCOUNT_SECRET" | tr -d '[:space:]')"
+          [ -z "$A" ] && A=$(curl -sS -H "$H" "$CF/accounts" | jq -r '.result[0].id // empty')
+          [ -z "$A" ] && A=$(curl -sS -H "$H" "$CF/memberships" | jq -r '.result[0].account.id // empty')
+          if [ -z "$A" ]; then
+            V=$(curl -sS -H "$H" "$CF/user/tokens/verify")
+            echo "Cloudflare says: $(echo "$V" | jq -c '{success, errors, status: .result.status}')"
+            if echo "$V" | jq -e '.success == true' >/dev/null; then
+              echo "::error::The token works but can't see your account. Add a secret named CLOUDFLARE_ACCOUNT_ID with your Cloudflare Account ID."
+            else
+              echo "::error::Cloudflare rejected CLOUDFLARE_API_TOKEN. Create a new API Token (not the Global API Key) with the 'Edit Cloudflare Workers' template and paste only the token."
+            fi
+            exit 1
+          fi
           echo "CLOUDFLARE_ACCOUNT_ID=$A" >> "$GITHUB_ENV"
           KV=$(curl -sS -H "$H" "$CF/accounts/$A/storage/kv/namespaces?per_page=100" | jq -r '.result[]? | select(.title=="solradar") | .id' | head -n1)
           if [ -z "$KV" ]; then
@@ -58,7 +72,10 @@ jobs:
       - name: Store your keys on Cloudflare (encrypted)
         run: |
           jq -n --arg a "$HELIUS_API_KEY" --arg b "$SOLANA_TRACKER_KEY" --arg c "$TELEGRAM_BOT_TOKEN" --arg d "$TELEGRAM_CHAT_ID" --arg e "$APP_PASSCODE" \
-            '{HELIUS_API_KEY:$a, SOLANA_TRACKER_KEY:$b, TELEGRAM_BOT_TOKEN:$c, TELEGRAM_CHAT_ID:$d, APP_PASSCODE:$e}' > secrets.json
+            --arg f "$TRADER_PRIVATE_KEY" --arg g "$JUPITER_API_KEY" \
+            '{HELIUS_API_KEY:$a, SOLANA_TRACKER_KEY:$b, TELEGRAM_BOT_TOKEN:$c, TELEGRAM_CHAT_ID:$d, APP_PASSCODE:$e}
+             + (if $f != "" then {TRADER_PRIVATE_KEY:$f} else {} end)
+             + (if $g != "" then {JUPITER_API_KEY:$g} else {} end)' > secrets.json
           npx --yes wrangler@4 secret bulk secrets.json
           rm -f secrets.json
 
