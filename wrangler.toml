@@ -8,5 +8,6 @@ binding = "KV"
 id = "KV_ID_PLACEHOLDER"
 
 [triggers]
-# 08:00, 14:00, 20:00 and 02:00 Mauritius time: refresh famous traders (08:00 also sends the morning leaderboard)
-crons = ["0 4,10,16,22 * * *"]
+# every minute: manage open copy trades (take profit, stop loss, time limit)
+# 08:00, 14:00, 20:00, 02:00 Mauritius: refresh famous traders (08:00 also sends the morning leaderboard)
+crons = ["* * * * *", "0 4,10,16,22 * * *"]

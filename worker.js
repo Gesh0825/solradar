@@ -240,10 +240,9 @@ async function handleHelius(env, txs) {
         if (t.post != null && t.post <= (t.pre || 0) * 0.01) delete st.pos[addr][t.mint]; else st.pos[addr][t.mint] = pos;
       }
 
-      if (cfg.paused) continue;
-      if (t.quote === 'SOL' && t.amount < cfg.minSol) continue;
-      await send(env, alertText(w, rec, info, pnlLine));
+      if (!cfg.paused && !(t.quote === 'SOL' && t.amount < cfg.minSol)) await send(env, alertText(w, rec, info, pnlLine));
       if (t.side === 'BUY') await maybeCluster(env, cfg, st, t.mint, info);
+      else await copyFollowSell(env, addr, t).catch(e => send(env, '⚠️ Copy-sell error: ' + esc(e.message)));
     }
   }
   if (cfgChanged) { await syncHook(env, cfg); await putCfg(env, cfg); }
@@ -271,7 +270,8 @@ async function maybeCluster(env, cfg, st, mint, info) {
   st.clusters[mint] = now;
   for (const [m, t] of Object.entries(st.clusters)) if (now - t > 86400) delete st.clusters[m];
   const names = buyers.map(a => cfg.wallets.find(w => w.addr === a)).filter(Boolean).map(w => '• ' + who(w)).join('\n');
-  await send(env, `🔥 <b>CLUSTER BUY</b> $${esc(info?.sym || short(mint))}\n${buyers.length} tracked traders bought within 1 hour:\n${names}\n${marketLine(info)}\n🔗 <a href="${info?.url || `https://dexscreener.com/solana/${mint}`}">Chart</a>\n<code>${mint}</code>`);
+  if (!cfg.paused) await send(env, `🔥 <b>CLUSTER BUY</b> $${esc(info?.sym || short(mint))}\n${buyers.length} tracked traders bought within 1 hour:\n${names}\n${marketLine(info)}\n🔗 <a href="${info?.url || `https://dexscreener.com/solana/${mint}`}">Chart</a>\n<code>${mint}</code>`);
+  await copyBuy(env, mint, info, buyers).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
 }
 
 // ---------------------------------------------------------------- famous traders
@@ -325,7 +325,13 @@ const HELP = `<b>SolRadar</b>
 /auto on · /auto off · /auto 15 — auto-track top famous traders
 /min 0.5 — ignore trades under 0.5 SOL
 /pause · /resume — mute alerts
-/status — health check`;
+/status — health check
+
+<b>Auto copy-trading</b>
+/copy — wallet, balance, open trades, profit
+/copy on · /copy off — start or stop auto-buying
+/copy size 10 — % of balance per trade
+/sellall — sell every open copy trade now`;
 
 async function handleCommand(env, text, chat) {
   const [raw, ...args] = text.trim().split(/\s+/);
@@ -395,6 +401,15 @@ async function handleCommand(env, text, chat) {
       const last = st.trades[0];
       return reply(`<b>Status</b>\nHelius feed: ${hook}\nWallets: ${cfg.wallets.length} (${cfg.wallets.filter(w => w.auto).length} auto)\nAlerts: ${cfg.paused ? '⏸ paused' : '▶️ on'} · min ${cfg.minSol} SOL\n` +
         `Last trade seen: ${last ? fmtAge(Date.now() - last.time * 1000) + ' ago' : 'none yet'}\nStorage writes today: ${st.writes || 0}/${MAX_KV_WRITES}`);
+    }
+    case '/copy': return reply(await copyCommand(env, args));
+    case '/sellall': {
+      const c = await getCopy(env);
+      const mints = Object.keys(c.pos);
+      if (!mints.length) return reply('No open copy trades.');
+      await reply(`Selling ${mints.length} position(s)…`);
+      for (const m of mints) await copySell(env, m, 1, 'you sent /sellall').catch(e => reply('⚠️ ' + esc(e.message)));
+      return null;
     }
     case '/fix': { const r = await syncHook(env, cfg); await putCfg(env, cfg); return reply(r.ok ? '🔧 Helius feed reconnected.' : '⚠️ ' + esc(r.error)); }
     default: return reply('Unknown command. Send /help');
@@ -485,9 +500,260 @@ async function api(env, req, url) {
   return json({ error: 'Not found' }, 404);
 }
 
+
+// ================================================================ AUTO COPY-TRADING
+// Buys when 2+ tracked traders buy the same coin within 1 hour (cluster), using a % of the
+// bot wallet's SOL. Sells when those traders sell, at +TP% (half), at -SL% (all) or after max hours.
+// Needs secrets TRADER_PRIVATE_KEY (a separate small wallet) and JUPITER_API_KEY. Off until /copy on.
+const JUP = 'https://api.jup.ag/swap/v2';
+const COPY_DEFAULT = { on: false, pct: 10, maxOpen: 5, minLiq: 20000, tp: 100, sl: 40, maxHours: 24, maxBuysPerDay: 10,
+  pos: {}, closed: [], realized: 0, day: '', buysToday: 0 };
+const RESERVE_SOL = 0.01; // left for network fees and token-account rent
+
+async function getCopy(env) {
+  const c = { ...COPY_DEFAULT, ...((await env.KV.get('copy', 'json')) || {}) };
+  c.pos ||= {}; c.closed ||= [];
+  if (c.day !== today()) { c.day = today(); c.buysToday = 0; }
+  return c;
+}
+const putCopy = (env, c) => env.KV.put('copy', JSON.stringify(c));
+
+// ---- base58
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function b58decode(str) {
+  const bytes = [0];
+  for (const ch of str) {
+    const v = B58.indexOf(ch);
+    if (v < 0) throw new Error('Private key has an invalid character');
+    let carry = v;
+    for (let i = 0; i < bytes.length; i++) { carry += bytes[i] * 58; bytes[i] = carry & 0xff; carry >>= 8; }
+    while (carry) { bytes.push(carry & 0xff); carry >>= 8; }
+  }
+  for (const ch of str) { if (ch === '1') bytes.push(0); else break; }
+  return new Uint8Array(bytes.reverse());
+}
+function b58encode(buf) {
+  const digits = [0];
+  for (const byte of buf) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i++) { carry += digits[i] << 8; digits[i] = carry % 58; carry = (carry / 58) | 0; }
+    while (carry) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = '';
+  for (const b of buf) { if (b === 0) out += '1'; else break; }
+  for (let i = digits.length - 1; i >= 0; i--) out += B58[digits[i]];
+  return out;
+}
+const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+function b64e(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); }
+
+// ---- wallet
+let KP = null;
+async function keypair(env) {
+  if (KP) return KP;
+  const raw = String(env.TRADER_PRIVATE_KEY || '');
+  if (!raw) throw new Error('No trading wallet yet. Add the TRADER_PRIVATE_KEY secret in GitHub and re-run the workflow.');
+  const sk = raw.startsWith('[') ? Uint8Array.from(JSON.parse(raw)) : b58decode(raw);
+  if (sk.length !== 64) throw new Error(`Private key should be 64 bytes, got ${sk.length}. Copy it again from Phantom.`);
+  const der = new Uint8Array([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20, ...sk.slice(0, 32)]);
+  let key;
+  try { key = await crypto.subtle.importKey('pkcs8', der, { name: 'Ed25519' }, false, ['sign']); }
+  catch { key = await crypto.subtle.importKey('pkcs8', der, { name: 'NODE-ED25519', namedCurve: 'NODE-ED25519' }, false, ['sign']); }
+  KP = { key, pub: sk.slice(32), addr: b58encode(sk.slice(32)) };
+  return KP;
+}
+async function signTx(b64, kp) {
+  const tx = b64d(b64);
+  const cu16 = (buf, o) => { let v = 0, s = 0, b; do { b = buf[o++]; v |= (b & 0x7f) << s; s += 7; } while (b & 0x80); return [v, o]; };
+  const [nSig, sigStart] = cu16(tx, 0);
+  const msgStart = sigStart + 64 * nSig;
+  const msg = tx.slice(msgStart);
+  let p = (msg[0] & 0x80) ? 1 : 0;
+  const nReq = msg[p]; p += 3;
+  const [nKeys, keysStart] = cu16(msg, p);
+  let idx = -1;
+  for (let i = 0; i < Math.min(nKeys, nReq); i++) {
+    const k = msg.subarray(keysStart + 32 * i, keysStart + 32 * i + 32);
+    if (k.every((b, j) => b === kp.pub[j])) { idx = i; break; }
+  }
+  if (idx < 0) throw new Error('Swap transaction is not for this wallet');
+  let sig;
+  try { sig = new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, kp.key, msg)); }
+  catch { sig = new Uint8Array(await crypto.subtle.sign({ name: 'NODE-ED25519' }, kp.key, msg)); }
+  tx.set(sig, sigStart + 64 * idx);
+  return b64e(tx);
+}
+
+// ---- chain + Jupiter
+async function rpc(env, method, params) {
+  const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message);
+  return d.result;
+}
+const solBalance = async (env, addr) => ((await rpc(env, 'getBalance', [addr, { commitment: 'confirmed' }]))?.value || 0);
+async function rawTokenBalance(env, owner, mint) {
+  const r = await rpc(env, 'getTokenAccountsByOwner', [owner, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+  return (r?.value || []).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount || '0'), 0n);
+}
+async function jupOrder(env, inputMint, outputMint, amount, taker) {
+  const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount) });
+  if (taker) q.set('taker', taker);
+  const r = await fetch(`${JUP}/order?${q}`, { headers: { 'x-api-key': env.JUPITER_API_KEY || '' } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.errorCode || d.error) throw new Error(`Jupiter: ${d.errorMessage || d.error || r.status}`);
+  return d;
+}
+async function swap(env, inputMint, outputMint, amount) {
+  const kp = await keypair(env);
+  const o = await jupOrder(env, inputMint, outputMint, amount, kp.addr);
+  if (!o.transaction) throw new Error('Jupiter returned no transaction' + (o.errorMessage ? ': ' + o.errorMessage : ''));
+  const signed = await signTx(o.transaction, kp);
+  const r = await fetch(`${JUP}/execute`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.JUPITER_API_KEY || '' },
+    body: JSON.stringify({ signedTransaction: signed, requestId: o.requestId }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (d.status !== 'Success') throw new Error(`Swap failed: ${d.error || d.code || r.status}` + (d.signature ? ` (tx ${d.signature})` : ''));
+  return {
+    sig: d.signature,
+    inAmt: BigInt(d.totalInputAmount || d.inputAmountResult || o.inAmount || amount),
+    outAmt: BigInt(d.totalOutputAmount || d.outputAmountResult || o.outAmount || 0),
+  };
+}
+const lamportsToSol = l => Number(l) / 1e9;
+
+// ---- buy on cluster
+async function copyBuy(env, mint, info, buyers) {
+  const c = await getCopy(env);
+  if (!c.on || c.pos[mint]) return;
+  const sym = esc(info?.sym || short(mint));
+  const skip = why => send(env, `⏭ <b>Copy skipped</b> $${sym}: ${why}`);
+  if (!info) return skip('not on DexScreener yet, too new to trade safely');
+  if ((info.liq || 0) < c.minLiq) return skip(`liquidity ${usd(info.liq)} is under ${usd(c.minLiq)}`);
+  if (Object.keys(c.pos).length >= c.maxOpen) return skip(`already ${c.maxOpen} open trades`);
+  if (c.buysToday >= c.maxBuysPerDay) return skip(`daily limit of ${c.maxBuysPerDay} buys reached`);
+  const kp = await keypair(env);
+  const bal = await solBalance(env, kp.addr);
+  const spend = Math.floor((bal - RESERVE_SOL * 1e9) * c.pct / 100);
+  if (spend < 0.005 * 1e9) return skip(`wallet balance too low (${lamportsToSol(bal).toFixed(3)} SOL). Send SOL to <code>${kp.addr}</code>`);
+  c.pos[mint] = { sym: info.sym, pending: true, at: Date.now() }; // lock against double buys
+  c.buysToday++;
+  await putCopy(env, c);
+  try {
+    const r = await swap(env, WSOL, mint, spend);
+    const c2 = await getCopy(env);
+    c2.pos[mint] = { sym: info.sym, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
+    await putCopy(env, c2);
+    await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${marketLine(info)}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${info.url}">Chart</a>`);
+  } catch (e) {
+    const c2 = await getCopy(env); delete c2.pos[mint]; await putCopy(env, c2);
+    await send(env, `⚠️ <b>Copy buy failed</b> $${sym}: ${esc(e.message)}`);
+  }
+}
+
+// ---- sell (fraction 0..1)
+async function copySell(env, mint, fraction, reason) {
+  const c = await getCopy(env);
+  const p = c.pos[mint];
+  if (!p || p.pending) return;
+  const kp = await keypair(env);
+  const have = await rawTokenBalance(env, kp.addr, mint);
+  if (have <= 0n) { delete c.pos[mint]; await putCopy(env, c); return; }
+  const amount = fraction >= 1 ? have : (have * BigInt(Math.round(fraction * 1000))) / 1000n;
+  if (amount <= 0n) return;
+  const r = await swap(env, mint, WSOL, amount);
+  const c2 = await getCopy(env);
+  const q = c2.pos[mint] || p;
+  const costPart = (q.sol || 0) * (fraction >= 1 ? 1 : fraction);
+  const got = lamportsToSol(r.outAmt);
+  const pnl = got - costPart;
+  c2.realized = (c2.realized || 0) + pnl;
+  if (fraction >= 1) {
+    delete c2.pos[mint];
+    c2.closed.unshift({ sym: q.sym, mint, sol: q.cost0 || q.sol, back: (q.back || 0) + got, at: Date.now() });
+    c2.closed.length = Math.min(c2.closed.length, 30);
+  } else { q.sol -= costPart; q.back = (q.back || 0) + got; q.tpDone = true; q.raw = (have - amount).toString(); c2.pos[mint] = q; }
+  await putCopy(env, c2);
+  await send(env, `🤖🔴 <b>COPY SELL ${fraction >= 1 ? 'ALL' : Math.round(fraction * 100) + '%'}</b> $${esc(q.sym || short(mint))}\nReason: ${esc(reason)}\n💰 Got ${got.toFixed(4)} SOL · ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${costPart > 0 ? ((pnl / costPart) * 100).toFixed(0) : '?'}%)\n📊 Total copy profit: ${c2.realized >= 0 ? '+' : ''}${c2.realized.toFixed(4)} SOL\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
+}
+
+// ---- follow the traders out
+async function copyFollowSell(env, trader, t) {
+  const c = await getCopy(env);
+  const p = c.pos[t.mint];
+  if (!p || p.pending || !(p.buyers || []).includes(trader)) return;
+  const frac = t.pre > 0 ? t.tokens / t.pre : 1;
+  if (frac < 0.5) return; // ignore small trims
+  const cfg = await getCfg(env);
+  const name = cfg.wallets.find(w => w.addr === trader)?.label || short(trader);
+  await copySell(env, t.mint, 1, `${name} sold ${Math.round(Math.min(1, frac) * 100)}% of their position`);
+}
+
+// ---- every minute: take profit / stop loss / time limit
+async function copyMonitor(env) {
+  const c = await getCopy(env);
+  const mints = Object.keys(c.pos);
+  if (!mints.length) return;
+  for (const m of mints) {
+    const p = c.pos[m];
+    if (p.pending) { if (Date.now() - p.at > 180000) { const c2 = await getCopy(env); delete c2.pos[m]; await putCopy(env, c2); } continue; }
+    try {
+      if (Date.now() - p.at > c.maxHours * 3600000) { await copySell(env, m, 1, `${c.maxHours}h time limit`); continue; }
+      const raw = BigInt(p.raw || '0');
+      if (raw <= 0n || !p.sol) continue;
+      const q = await jupOrder(env, m, WSOL, raw);
+      const value = lamportsToSol(q.outAmount || 0); // what the tokens we still hold would sell for now
+      const pct = (value / p.sol - 1) * 100;
+      if (pct <= -c.sl) await copySell(env, m, 1, `stop loss (${pct.toFixed(0)}%)`);
+      else if (!p.tpDone && pct >= c.tp) await copySell(env, m, 0.5, `take profit (+${pct.toFixed(0)}%)`);
+    } catch (e) { console.log('monitor', m, e.message); }
+  }
+}
+
+// ---- /copy command
+async function copyCommand(env, args) {
+  const c = await getCopy(env);
+  const a = (args[0] || '').toLowerCase();
+  if (a === 'on' || a === 'off') {
+    if (a === 'on') {
+      const kp = await keypair(env).catch(e => null);
+      if (!kp) return '⚠️ No trading wallet yet. Add the TRADER_PRIVATE_KEY secret in GitHub, then re-run the workflow.';
+      if (!env.JUPITER_API_KEY) return '⚠️ Add the JUPITER_API_KEY secret in GitHub, then re-run the workflow.';
+    }
+    c.on = a === 'on'; await putCopy(env, c);
+    return c.on
+      ? `🤖 <b>Copy-trading ON</b>\nBuys ${c.pct}% of the wallet balance when 2+ of your traders buy the same coin within 1 hour.\nSells when they sell, +${c.tp}% (half), −${c.sl}% (all) or after ${c.maxHours}h.\nSend /copy off to stop.`
+      : '⏸ Copy-trading OFF. Open trades are still managed (TP/SL/time). Send /sellall to close them now.';
+  }
+  if (a === 'size') {
+    const v = parseFloat(args[1]);
+    if (!(v >= 1 && v <= 50)) return 'Usage: /copy size 10  (1–50% of balance per trade)';
+    c.pct = v; await putCopy(env, c); return `✅ Each copy trade now uses ${v}% of the wallet balance.`;
+  }
+  // status
+  let wallet = 'not set (add TRADER_PRIVATE_KEY)', bal = '';
+  try { const kp = await keypair(env); wallet = `<code>${kp.addr}</code>`; bal = `${lamportsToSol(await solBalance(env, kp.addr)).toFixed(4)} SOL`; } catch {}
+  const open = Object.entries(c.pos).map(([m, p]) => `• $${esc(p.sym || short(m))}: ${p.pending ? 'buying…' : (p.sol || 0).toFixed(4) + ' SOL in, ' + fmtAge(Date.now() - p.at) + ' ago'}`).join('\n') || 'none';
+  const last = c.closed.slice(0, 5).map(x => `• $${esc(x.sym)}: ${(x.back - x.sol) >= 0 ? '+' : ''}${(x.back - x.sol).toFixed(4)} SOL`).join('\n') || 'none yet';
+  return `🤖 <b>Copy-trading ${c.on ? 'ON' : 'OFF'}</b>\nWallet: ${wallet}\nBalance: ${bal || '?'}\nSize: ${c.pct}% per trade · max ${c.maxOpen} open · ${c.buysToday}/${c.maxBuysPerDay} buys today\n\n<b>Open</b>\n${open}\n\n<b>Last closed</b>\n${last}\n\nTotal copy profit: ${(c.realized || 0) >= 0 ? '+' : ''}${(c.realized || 0).toFixed(4)} SOL`;
+}
+
 // ---------------------------------------------------------------- entry
+// Remove stray spaces / new lines that can sneak in when secrets are pasted on a phone.
+function cleanEnv(env) {
+  const o = { ...env };
+  for (const k of ['HELIUS_API_KEY', 'SOLANA_TRACKER_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'APP_PASSCODE', 'TRADER_PRIVATE_KEY', 'JUPITER_API_KEY'])
+    if (typeof o[k] === 'string') o[k] = o[k].replace(/\s+/g, '');
+  if (o.TELEGRAM_BOT_TOKEN) o.TELEGRAM_BOT_TOKEN = o.TELEGRAM_BOT_TOKEN.replace(/^bot(?=\d)/i, '');
+  return o;
+}
+
 export default {
   async fetch(req, env, ctx) {
+    env = cleanEnv(env);
     const url = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     try {
@@ -518,6 +784,8 @@ export default {
     }
   },
   async scheduled(event, env, ctx) {
+    env = cleanEnv(env);
+    if (event.cron === '* * * * *') { ctx.waitUntil(copyMonitor(env).catch(e => console.log('monitor', e.message))); return; }
     ctx.waitUntil((async () => {
       await autoRefresh(env, true).catch(e => console.log('auto', e.message));
       if (new Date(event.scheduledTime).getUTCHours() === 4) {
