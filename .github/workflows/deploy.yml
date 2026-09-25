@@ -1,0 +1,80 @@
+name: Deploy SolRadar server
+
+on:
+  push:
+    branches: [main]
+    paths: ['worker.js', 'wrangler.toml', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+      SOLANA_TRACKER_KEY: ${{ secrets.SOLANA_TRACKER_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      APP_PASSCODE: ${{ secrets.APP_PASSCODE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check your secrets
+        run: |
+          missing=""
+          for k in CLOUDFLARE_API_TOKEN HELIUS_API_KEY SOLANA_TRACKER_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID APP_PASSCODE; do
+            [ -z "${!k}" ] && missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then echo "::error::Add these in Settings > Secrets and variables > Actions:$missing"; exit 1; fi
+          echo "All 6 secrets found."
+
+      - name: Prepare Cloudflare (account, storage, web address)
+        run: |
+          CF=https://api.cloudflare.com/client/v4
+          H="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          A=$(curl -sS -H "$H" "$CF/accounts" | jq -r '.result[0].id // empty')
+          if [ -z "$A" ]; then echo "::error::The Cloudflare token can't see your account. Create it with the 'Edit Cloudflare Workers' template."; exit 1; fi
+          echo "CLOUDFLARE_ACCOUNT_ID=$A" >> "$GITHUB_ENV"
+          KV=$(curl -sS -H "$H" "$CF/accounts/$A/storage/kv/namespaces?per_page=100" | jq -r '.result[]? | select(.title=="solradar") | .id' | head -n1)
+          if [ -z "$KV" ]; then
+            KV=$(curl -sS -X POST -H "$H" -H "Content-Type: application/json" -d '{"title":"solradar"}' "$CF/accounts/$A/storage/kv/namespaces" | jq -r '.result.id // empty')
+          fi
+          if [ -z "$KV" ]; then echo "::error::Couldn't create Cloudflare storage. Check the token template."; exit 1; fi
+          sed -i "s/KV_ID_PLACEHOLDER/$KV/" wrangler.toml
+          SUB=$(curl -sS -H "$H" "$CF/accounts/$A/workers/subdomain" | jq -r '.result.subdomain // empty')
+          if [ -z "$SUB" ]; then
+            SUB="$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9')-$RANDOM"
+            curl -sS -X PUT -H "$H" -H "Content-Type: application/json" -d "{\"subdomain\":\"$SUB\"}" "$CF/accounts/$A/workers/subdomain" | jq -c '.success'
+          fi
+          echo "WORKER_URL=https://solradar.$SUB.workers.dev" >> "$GITHUB_ENV"
+
+      - name: Deploy server to Cloudflare
+        run: npx --yes wrangler@4 deploy
+
+      - name: Store your keys on Cloudflare (encrypted)
+        run: |
+          jq -n --arg a "$HELIUS_API_KEY" --arg b "$SOLANA_TRACKER_KEY" --arg c "$TELEGRAM_BOT_TOKEN" --arg d "$TELEGRAM_CHAT_ID" --arg e "$APP_PASSCODE" \
+            '{HELIUS_API_KEY:$a, SOLANA_TRACKER_KEY:$b, TELEGRAM_BOT_TOKEN:$c, TELEGRAM_CHAT_ID:$d, APP_PASSCODE:$e}' > secrets.json
+          npx --yes wrangler@4 secret bulk secrets.json
+          rm -f secrets.json
+
+      - name: Connect Helius and Telegram
+        run: |
+          APP="https://$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z').github.io/${{ github.event.repository.name }}/"
+          for i in 1 2 3 4 5 6 7 8; do
+            sleep 10
+            R=$(curl -sS -H "x-pass: $APP_PASSCODE" "$WORKER_URL/setup?app=$APP" || true)
+            echo "$R" | grep -q '"ok":true' && break
+          done
+          echo "Setup result: $R"
+          if ! echo "$R" | grep -q '"ok":true'; then echo "::error::Setup didn't finish. Result: $R"; exit 1; fi
+          {
+            echo "## ✅ SolRadar server is live"
+            echo "Check Telegram: your bot sent the connection code for the app."
+            echo ""
+            echo "Server: $WORKER_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
