@@ -127,10 +127,17 @@ function fmtAge(ms) {
   if (m < 1440) return Math.round(m / 60) + 'h';
   return Math.round(m / 1440) + 'd';
 }
+let lastSt = 0;
 async function stGet(env, path) {
-  const r = await fetch(ST + path, { headers: { 'x-api-key': env.SOLANA_TRACKER_KEY } });
-  if (!r.ok) throw new Error(`Solana Tracker ${r.status}`);
-  return r.json();
+  for (let attempt = 0; ; attempt++) {
+    const wait = lastSt + 450 - Date.now();   // free plan: a few requests per second
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastSt = Date.now();
+    const r = await fetch(ST + path, { headers: { 'x-api-key': env.SOLANA_TRACKER_KEY } });
+    if (r.status === 429 && attempt < 2) { await new Promise(res => setTimeout(res, 2000 * (attempt + 1))); continue; }
+    if (!r.ok) throw new Error(r.status === 429 ? 'Solana Tracker busy, try again in a minute' : `Solana Tracker ${r.status}`);
+    return r.json();
+  }
 }
 const polling = env => !!env.ALCHEMY_API_KEY;
 const rpcUrl = env => (polling(env)
@@ -370,7 +377,7 @@ async function pollFeed(env) {
     for (const x of todo) {
       if (budget <= 0) { all = false; break; }
       budget--; feed.req++;
-      const tx = await rpc(env, 'getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]).catch(e => { err = e.message; return null; });
+      const tx = await rpc(env, 'getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]).catch(e => { err = e.message; return null; });
       last = x.signature;
       const t = parseRawSwap(tx, w.addr);
       if (t) parsed.push(t);
@@ -516,7 +523,7 @@ async function scanCommand(env, args, reply) {
   const minHold = a.map(parseDur).find(v => v != null) ?? 3600;
   const all = a.includes('all');
   const page = Math.max(1, +(a.find(x => /^p\d+$/.test(x)) || 'p1').slice(1));
-  await reply(`🔎 Scanning ${all ? 'the most profitable wallets' : 'famous traders'} of the last 7 days (ranks ${(page - 1) * 30 + 1}–${page * 30}) for day-traders (typical hold ${holdText(minHold)}+)… about 30 seconds.`);
+  await reply(`🔎 Scanning ${all ? 'the most profitable wallets' : 'famous traders'} of the last 7 days (ranks ${(page - 1) * 30 + 1}–${page * 30}) for day traders (typical hold ${holdText(minHold)}–24h)… about 30 seconds.`);
   const src = all
     ? ((await stGet(env, '/v2/pnl/leaderboard/top?days=7&sort=realized&direction=desc&limit=100&minTrades=10&excludeArbitrage=true')).traders || [])
     : await famous(env, 7);
@@ -531,7 +538,7 @@ async function scanCommand(env, args, reply) {
     } catch (e) { rows.push({ t, err: e.message }); }
   }
   const ok = rows.filter(r => r.hold != null && r.closed >= 5);
-  const good = ok.filter(r => r.hold >= minHold && (r.win ?? 0) >= 0.45).sort((a, b) => (b.t.period.realized || 0) - (a.t.period.realized || 0)).slice(0, 8);
+  const good = ok.filter(r => r.hold >= minHold && r.hold < 86400 && (r.win ?? 0) >= 0.45).sort((a, b) => (b.t.period.realized || 0) - (a.t.period.realized || 0)).slice(0, 8);
   const line = (r, i) => {
     const n = r.t.identity?.name || short(r.t.wallet), tw = twOf(r.t.identity?.twitter);
     return `${i + 1}. <b>${esc(n)}</b>${tw ? ' @' + esc(tw) : ''}${tracked.has(r.t.wallet) ? ' 📌' : ''}\n` +
@@ -539,11 +546,11 @@ async function scanCommand(env, args, reply) {
       `    <code>/add ${r.t.wallet} ${esc(n.replace(/\s+/g, ''))}</code>`;
   };
   if (good.length) {
-    return reply(`📋 <b>Day-traders</b> (hold ${holdText(minHold)}+, win 45%+, profitable last 7 days)\n\n` + good.map(line).join('\n\n') +
+    return reply(`📋 <b>Day-traders</b> (close within the day: hold ${holdText(minHold)}–24h, win 45%+, profitable last 7 days)\n\n` + good.map(line).join('\n\n') +
       `\n\nTap a <code>/add</code> line to copy it, then send it. 📌 = already tracked.\nChecked ${rows.length} traders; ${ok.length} had enough closed trades to measure.`);
   }
   const closest = ok.sort((a, b) => b.hold - a.hold).slice(0, 5);
-  return reply(`No trader passed (hold ${holdText(minHold)}+, win 45%+). Longest holders among the top ${rows.length}:\n\n` +
+  return reply(`No day trader passed (hold ${holdText(minHold)}–24h, win 45%+). Longest holders among the top ${rows.length}:\n\n` +
     (closest.length ? closest.map(line).join('\n\n') : 'No usable data returned. Send /raw with one address so we can check the format.') +
     `\n\nTry a shorter hold, e.g. <code>/scan 30m</code>, the next 30 with <code>/scan p2</code>, or unknown wallets with <code>/scan all</code>.`);
 }
@@ -561,12 +568,12 @@ async function styleCommand(env, args, reply) {
       const pos = d.positions || d.data?.positions || (Array.isArray(d.data) ? d.data : []);
       const r = traderStyle(pos);
       const name = d.identity?.name || cfg.wallets.find(x => x.addr === w)?.label || short(w);
-      const verdict = r.hold == null ? '❔ not enough data' : r.hold >= 3600 ? '🟢 day-trader' : r.hold >= 900 ? '🟡 short swings' : '🔴 scalper';
+      const verdict = r.hold == null ? '❔ not enough data' : r.hold >= 86400 ? '🔵 swing trader' : r.hold >= 3600 ? '🟢 day trader' : r.hold >= 900 ? '🟡 short-term' : '🔴 scalper';
       out.push({ hold: r.hold ?? -1, text: `<b>${esc(name)}</b> ${verdict}\n    holds ~${holdText(r.hold)} · win ${r.win != null ? Math.round(r.win * 100) + '%' : '?'} · ${r.perDay != null ? Math.round(r.perDay) : '?'} trades/day · ${r.closed} closed\n    <code>/add ${w} ${esc(String(name).replace(/\s+/g, ''))}</code>` });
     } catch (e) { out.push({ hold: -2, text: `<code>${short(w)}</code>: ⚠️ ${esc(e.message)}` }); }
   }
   out.sort((x, y) => y.hold - x.hold);
-  return reply('📊 <b>Trading style</b> (longest holders first)\n\n' + out.map(o => o.text).join('\n\n') + '\n\n🟢 1h+ · 🟡 15m–1h · 🔴 under 15m');
+  return reply('📊 <b>Trading style</b> (longest holders first)\n\n' + out.map(o => o.text).join('\n\n') + '\n\n🔴 under 15m · 🟡 15m–1h · 🟢 day trader 1h–24h · 🔵 swing 24h+');
 }
 
 // ---------------------------------------------------------------- Telegram commands
@@ -863,7 +870,7 @@ let lastRpc = 0;
 const isRate = m => /compute units per second|rate limit|too many requests|429/i.test(m || '');
 async function rpc(env, method, params) {
   for (let attempt = 0; ; attempt++) {
-    const wait = lastRpc + 350 - Date.now();
+    const wait = lastRpc + 700 - Date.now();
     if (wait > 0) await sleep(wait);
     lastRpc = Date.now();
     const r = await fetch(rpcUrl(env), {
