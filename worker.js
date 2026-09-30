@@ -131,9 +131,13 @@ async function stGet(env, path) {
   if (!r.ok) throw new Error(`Solana Tracker ${r.status}`);
   return r.json();
 }
+const polling = env => !!env.ALCHEMY_API_KEY;
+const rpcUrl = env => (polling(env)
+  ? `https://solana-mainnet.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}`
+  : `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`);
 async function tokenBalance(env, wallet, mint) {
   try {
-    const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`, {
+    const r = await fetch(rpcUrl(env), {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner', params: [wallet, { mint }, { encoding: 'jsonParsed' }] }),
     });
@@ -144,6 +148,7 @@ async function tokenBalance(env, wallet, mint) {
 
 // ---------------------------------------------------------------- Helius webhook management
 async function syncHook(env, cfg) {
+  if (polling(env)) return { ok: true, note: 'polling' }; // wallets are read straight from cfg every minute
   const addrs = cfg.wallets.map(w => w.addr);
   if (!cfg.url) return { ok: false, error: 'Server URL unknown. Run setup again.' };
   const body = {
@@ -211,13 +216,56 @@ function parseSwap(tx, wallet) {
 }
 
 // ---------------------------------------------------------------- incoming trades
+// One parsed trade from a tracked wallet -> record, PnL, alert, cluster, copy-trading.
+// t may already carry pre/post token balances (polling); otherwise they are looked up.
+async function ingest(env, cfg, st, seen, w, t) {
+  const addr = w.addr;
+  const key = t.sig + ':' + addr;
+  if (seen.has(key)) return { changed: false };
+  seen.add(key);
+
+  st.cnt[addr] = (st.cnt[addr] || 0) + 1;
+  if (st.cnt[addr] > BOT_TRADES_PER_DAY && w.auto) {
+    cfg.wallets = cfg.wallets.filter(x => x.addr !== addr);
+    await send(env, `🤖 Stopped tracking <b>${esc(w.label)}</b>: ${st.cnt[addr]} trades today looks like a bot.`);
+    return { changed: true, cfgChanged: true };
+  }
+
+  const info = await tokenInfo(t.mint);
+  if (t.post == null) {
+    const now = await tokenBalance(env, addr, t.mint);
+    if (now != null) { t.post = now; t.pre = t.side === 'BUY' ? Math.max(0, now - t.tokens) : now + t.tokens; }
+  }
+  const rec = { key, wallet: addr, ...t, sym: info?.sym || '', img: info?.img || '', mc: info?.mc || null };
+  st.trades.unshift(rec);
+  if (st.trades.length > MAX_TRADES) st.trades.length = MAX_TRADES;
+
+  st.pos[addr] ||= {};
+  const pos = st.pos[addr][t.mint] || { cost: 0, q: t.quote };
+  let pnlLine = '';
+  if (t.side === 'BUY') { if (pos.q === t.quote) pos.cost += t.amount; st.pos[addr][t.mint] = pos; }
+  else {
+    const frac = t.pre > 0 ? Math.min(1, t.tokens / t.pre) : 1;
+    if (pos.cost > 0 && pos.q === t.quote) {
+      const out = pos.cost * frac, pnl = t.amount - out; pos.cost -= out;
+      const pct = out > 0 ? (pnl / out) * 100 : 0;
+      pnlLine = `📈 Profit on this sell: ${pnl >= 0 ? '+' : ''}${t.quote === 'SOL' ? pnl.toFixed(2) + ' SOL' : signedUsd(pnl)} (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)\n`;
+    }
+    if (t.post != null && t.post <= (t.pre || 0) * 0.01) delete st.pos[addr][t.mint]; else st.pos[addr][t.mint] = pos;
+  }
+
+  if (!cfg.paused && !(t.quote === 'SOL' && t.amount < cfg.minSol)) await send(env, alertText(w, rec, info, pnlLine));
+  if (t.side === 'BUY') await maybeCluster(env, cfg, st, t.mint, info, t.exited);
+  else await copyFollowSell(env, addr, t).catch(e => send(env, '⚠️ Copy-sell error: ' + esc(e.message)));
+  return { changed: true };
+}
+
 async function handleHelius(env, txs) {
   const cfg = await getCfg(env);
   const tracked = new Map(cfg.wallets.map(w => [w.addr, w]));
   const st = await getState(env);
   const seen = new Set(st.trades.map(t => t.key));
   let changed = false, cfgChanged = false;
-
   for (const tx of Array.isArray(txs) ? txs : [txs]) {
     const involved = new Set([tx.feePayer, ...(tx.accountData || []).map(a => a.account),
       ...(tx.accountData || []).flatMap(a => (a.tokenBalanceChanges || []).map(t => t.userAccount))]);
@@ -226,48 +274,125 @@ async function handleHelius(env, txs) {
       if (!w) continue;
       const t = parseSwap(tx, addr);
       if (!t) continue;
-      const key = t.sig + ':' + addr;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      // bot filter
-      st.cnt[addr] = (st.cnt[addr] || 0) + 1;
-      if (st.cnt[addr] > BOT_TRADES_PER_DAY && w.auto) {
-        cfg.wallets = cfg.wallets.filter(x => x.addr !== addr); tracked.delete(addr); cfgChanged = true;
-        await send(env, `🤖 Stopped tracking <b>${esc(w.label)}</b>: ${st.cnt[addr]} trades today looks like a bot.`);
-        continue;
-      }
-
-      const info = await tokenInfo(t.mint);
-      const now = await tokenBalance(env, addr, t.mint);
-      if (now != null) { t.post = now; t.pre = t.side === 'BUY' ? Math.max(0, now - t.tokens) : now + t.tokens; }
-      const rec = { key, wallet: addr, ...t, sym: info?.sym || '', img: info?.img || '', mc: info?.mc || null };
-      st.trades.unshift(rec);
-      if (st.trades.length > MAX_TRADES) st.trades.length = MAX_TRADES;
-      changed = true;
-
-      // position cost for PnL on sells
-      st.pos[addr] ||= {};
-      const pos = st.pos[addr][t.mint] || { cost: 0, q: t.quote };
-      let pnlLine = '';
-      if (t.side === 'BUY') { if (pos.q === t.quote) pos.cost += t.amount; st.pos[addr][t.mint] = pos; }
-      else {
-        const frac = t.pre > 0 ? Math.min(1, t.tokens / t.pre) : 1;
-        if (pos.cost > 0 && pos.q === t.quote) {
-          const out = pos.cost * frac, pnl = t.amount - out; pos.cost -= out;
-          const pct = out > 0 ? (pnl / out) * 100 : 0;
-          pnlLine = `📈 Profit on this sell: ${pnl >= 0 ? '+' : ''}${t.quote === 'SOL' ? pnl.toFixed(2) + ' SOL' : signedUsd(pnl)} (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)\n`;
-        }
-        if (t.post != null && t.post <= (t.pre || 0) * 0.01) delete st.pos[addr][t.mint]; else st.pos[addr][t.mint] = pos;
-      }
-
-      if (!cfg.paused && !(t.quote === 'SOL' && t.amount < cfg.minSol)) await send(env, alertText(w, rec, info, pnlLine));
-      if (t.side === 'BUY') await maybeCluster(env, cfg, st, t.mint, info);
-      else await copyFollowSell(env, addr, t).catch(e => send(env, '⚠️ Copy-sell error: ' + esc(e.message)));
+      const r = await ingest(env, cfg, st, seen, w, t);
+      changed ||= r.changed; if (r.cfgChanged) { cfgChanged = true; tracked.delete(addr); }
     }
   }
   if (cfgChanged) { await syncHook(env, cfg); await putCfg(env, cfg); }
   if (changed) await putState(env, st);
+}
+
+// ---------------------------------------------------------------- polling feed (Alchemy)
+// Every minute: ask for each tracked wallet's new transactions, parse swaps, ingest them.
+// Fixed, predictable cost: busy or spam wallets cannot drain the plan.
+const FEED_DAILY_CAP = 20000;   // requests per UTC day (Alchemy free: 30M compute units/month)
+const FEED_TX_PER_RUN = 8;      // transactions parsed per minute (Cloudflare free: 50 subrequests per run)
+const FEED_SIG_LIMIT = 40;      // more new transactions than this in one minute = burst/bot, skipped
+
+function parseRawSwap(tx, wallet) {
+  if (!tx || !tx.meta || tx.meta.err) return null;
+  const keys = tx.transaction.message.accountKeys.map(k => (typeof k === 'string' ? k : k.pubkey));
+  const i = keys.indexOf(wallet);
+  let sol = 0;
+  if (i >= 0) {
+    sol = (tx.meta.postBalances[i] - tx.meta.preBalances[i]) / 1e9;
+    if (i === 0) sol += tx.meta.fee / 1e9;
+  }
+  const bal = {};
+  for (const [arr, k] of [[tx.meta.preTokenBalances, 'pre'], [tx.meta.postTokenBalances, 'post']])
+    for (const b of arr || []) {
+      if (b.owner !== wallet) continue;
+      bal[b.mint] ||= { pre: 0, post: 0 };
+      bal[b.mint][k] += parseFloat(b.uiTokenAmount?.uiAmountString || '0') || 0;
+    }
+  const d = m => (bal[m] ? bal[m].post - bal[m].pre : 0);
+  sol += d(WSOL);
+  const usdAmt = d(USDC) + d(USDT);
+  let best = null;
+  for (const [m, v] of Object.entries(bal)) {
+    if (QUOTES.has(m)) continue;
+    const dd = v.post - v.pre;
+    if (Math.abs(dd) < 1e-9) continue;
+    if (!best || Math.abs(dd) > Math.abs(best.d)) best = { m, d: dd, pre: v.pre, post: v.post };
+  }
+  if (!best) return null;
+  let quote, amt;
+  if (Math.abs(sol) >= 0.001) { quote = 'SOL'; amt = sol; }
+  else if (Math.abs(usdAmt) >= 0.01) { quote = 'USD'; amt = usdAmt; }
+  else return null;
+  const base = { mint: best.m, quote, pre: best.pre, post: best.post, time: tx.blockTime || Math.floor(Date.now() / 1000), sig: tx.transaction.signatures[0], src: '' };
+  if (best.d > 0 && amt < 0) return { ...base, side: 'BUY', tokens: best.d, amount: -amt };
+  if (best.d < 0 && amt > 0) return { ...base, side: 'SELL', tokens: -best.d, amount: amt };
+  return null;
+}
+
+async function pollFeed(env) {
+  if (!polling(env)) return;
+  const cfg = await getCfg(env);
+  const st = await getState(env);
+  st.cur ||= {};
+  if (!st.feed || st.feed.day !== today()) st.feed = { day: today(), req: 0, warned: false, busy: {}, errWarn: st.feed?.errWarn || 0, hookTry: st.feed?.hookTry || '' };
+  const feed = st.feed;
+  feed.lastRun = Date.now();
+
+  // One-off: remove the old Helius webhook so it never spends credits again (retried once a day).
+  if (cfg.hookId && feed.hookTry !== today()) {
+    feed.hookTry = today();
+    const r = await fetch(`${HELIUS_API}/${cfg.hookId}?api-key=${encodeURIComponent(env.HELIUS_API_KEY)}`, { method: 'DELETE' }).catch(() => null);
+    if (r && (r.ok || r.status === 404)) { cfg.hookId = ''; await putCfg(env, cfg); }
+  }
+
+  if (!cfg.wallets.length) { await putState(env, st); return; }
+  if (feed.req >= FEED_DAILY_CAP) {
+    if (!feed.warned) { feed.warned = true; await send(env, `🛑 <b>Trade feed paused for today</b>: ${feed.req} requests used (daily brake ${FEED_DAILY_CAP}). It restarts automatically at 04:00 Mauritius time.`); }
+    await putState(env, st); return;
+  }
+
+  const seen = new Set(st.trades.map(t => t.key));
+  let budget = FEED_TX_PER_RUN, cfgChanged = false, err = '';
+  for (const w of cfg.wallets.slice()) {
+    const cur = st.cur[w.addr];
+    let sigs;
+    try {
+      feed.req++;
+      sigs = await rpc(env, 'getSignaturesForAddress', [w.addr, cur ? { limit: FEED_SIG_LIMIT, until: cur, commitment: 'confirmed' } : { limit: 1, commitment: 'confirmed' }]);
+    } catch (e) { err = e.message; continue; }
+    if (!sigs || !sigs.length) continue;
+    if (!cur) { st.cur[w.addr] = sigs[0].signature; continue; }         // first run: start from now
+    if (sigs.length >= FEED_SIG_LIMIT) {                                  // burst: skip, warn at most hourly
+      st.cur[w.addr] = sigs[0].signature;
+      if (!feed.busy[w.addr] || Date.now() - feed.busy[w.addr] > 3600000) {
+        feed.busy[w.addr] = Date.now();
+        await send(env, `⚡ <b>${esc(w.label)}</b> made ${sigs.length}+ transactions in a minute (bot-like burst), skipped to keep the feed light.`);
+      }
+      continue;
+    }
+    const todo = sigs.filter(x => !x.err).reverse();                      // oldest first
+    let last = null, all = true;
+    const parsed = [];
+    for (const x of todo) {
+      if (budget <= 0) { all = false; break; }
+      budget--; feed.req++;
+      const tx = await rpc(env, 'getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]).catch(e => { err = e.message; return null; });
+      last = x.signature;
+      const t = parseRawSwap(tx, w.addr);
+      if (t) parsed.push(t);
+    }
+    // a buy that was already sold again within the same minute can't be copied: mark it
+    parsed.forEach((t, i) => { if (t.side === 'BUY' && parsed.slice(i + 1).some(u => u.side === 'SELL' && u.mint === t.mint)) t.exited = true; });
+    for (const t of parsed) {
+      const r = await ingest(env, cfg, st, seen, w, t);
+      if (r.cfgChanged) cfgChanged = true;
+    }
+    st.cur[w.addr] = all ? sigs[0].signature : (last || cur);
+  }
+  feed.err = err;
+  if (err && Date.now() - (feed.errWarn || 0) > 3600000) {
+    feed.errWarn = Date.now();
+    await send(env, `⚠️ <b>Trade feed problem</b>: ${esc(err)}\nCheck the ALCHEMY_API_KEY secret, then send /status.`);
+  }
+  if (cfgChanged) await putCfg(env, cfg);
+  await putState(env, st);
 }
 
 function who(w) { return `<b>${esc(w.label)}</b>${w.tw ? ` (@${esc(w.tw)})` : ''}${w.auto ? ' ⭐' : ''}`; }
@@ -284,7 +409,7 @@ function alertText(w, t, info, pnlLine) {
   const pct = t.pre > 0 ? Math.round(Math.min(1, t.tokens / t.pre) * 100) : null;
   return `🔴 <b>${full ? 'SOLD ALL' : pct != null ? `SOLD ${pct}%` : 'SOLD'}</b> $${sym}\n👤 ${who(w)}\n💰 ${fmtNum(t.tokens)} tokens → ${amt}\n${pnlLine}${marketLine(info)}\n⏱ ${lag}s ago\n${links}`;
 }
-async function maybeCluster(env, cfg, st, mint, info) {
+async function maybeCluster(env, cfg, st, mint, info, exited) {
   const now = Date.now() / 1000;
   const buyers = [...new Set(st.trades.filter(t => t.mint === mint && t.side === 'BUY' && now - t.time < CLUSTER_WINDOW).map(t => t.wallet))];
   if (buyers.length < 2 || (st.clusters[mint] && now - st.clusters[mint] < CLUSTER_WINDOW)) return;
@@ -292,6 +417,9 @@ async function maybeCluster(env, cfg, st, mint, info) {
   for (const [m, t] of Object.entries(st.clusters)) if (now - t > 86400) delete st.clusters[m];
   const names = buyers.map(a => cfg.wallets.find(w => w.addr === a)).filter(Boolean).map(w => '• ' + who(w)).join('\n');
   if (!cfg.paused) await send(env, `🔥 <b>CLUSTER BUY</b> $${esc(info?.sym || short(mint))}\n${buyers.length} tracked traders bought within 1 hour:\n${names}\n${marketLine(info)}\n🔗 <a href="${info?.url || `https://dexscreener.com/solana/${mint}`}">Chart</a>\n<code>${mint}</code>`);
+  // don't copy if a trader who triggered it has already fully exited the coin
+  const gone = exited || buyers.some(a => st.pos[a] && !st.pos[a][mint]);
+  if (gone) { if ((await getCopy(env)).on) await send(env, `⏭ <b>Copy skipped</b> $${esc(info?.sym || short(mint))}: a trader already sold it again.`); return; }
   await copyBuy(env, mint, info, buyers).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
 }
 
@@ -352,10 +480,76 @@ function walletSummary(d) {
   };
 }
 const pctText = v => (v == null || !isFinite(v) ? '?' : Math.round(Math.abs(v) <= 1 ? v * 100 : v) + '%');
+
+// ---------------------------------------------------------------- /scan: find day-traders
+// Ranks the top famous traders of the last 7 days by how long they typically hold a coin.
+// Uses 1 + up to 30 Solana Tracker requests (Cloudflare free plan: 50 outside calls per command).
+const holdText = s => (s == null || !isFinite(s) ? '?' : s < 60 ? Math.round(s) + 's' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : (s / 86400).toFixed(1) + 'd');
+function parseDur(a) {
+  const m = String(a || '').toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(m|min|h|hr|d)?$/);
+  if (!m) return null;
+  const v = +m[1], u = m[2] || 'h';
+  return u.startsWith('m') ? v * 60 : u.startsWith('d') ? v * 86400 : v * 3600;
+}
+const median = a => { if (!a.length) return null; const b = a.slice().sort((x, y) => x - y), i = b.length >> 1; return b.length % 2 ? b[i] : (b[i - 1] + b[i]) / 2; };
+const toSec = t => (t == null ? null : t > 1e12 ? t / 1000 : t);
+
+function traderStyle(positions) {
+  const holds = [], wins = [];
+  let trades = 0, first = Infinity, lastT = 0;
+  for (const p of positions) {
+    const tm = p.timing || {}, c = p.counts || {};
+    trades += c.total ?? ((c.buys || 0) + (c.sells || 0));
+    const fb = toSec(tm.firstBuy ?? tm.firstTrade), ls = toSec(tm.lastSell), lt = toSec(tm.lastTrade);
+    if (fb) first = Math.min(first, fb);
+    if (lt) lastT = Math.max(lastT, lt);
+    const closed = ls != null && ((p.current?.balance ?? 0) <= 0 || (p.current?.value ?? 0) < 1);
+    if (!closed) continue;
+    const h = tm.holdTimeSecs ?? (fb && ls ? ls - fb : null);
+    if (h != null && h >= 0) holds.push(h);
+    const r = p.pnl?.realized ?? p.pnl?.total;
+    if (r != null) wins.push(r > 0 ? 1 : 0);
+  }
+  const days = first < Infinity && lastT ? Math.max(1, (lastT - first) / 86400) : null;
+  return { hold: median(holds), closed: holds.length, win: wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : null, perDay: days ? trades / days : null };
+}
+
+async function scanCommand(env, args, reply) {
+  const minHold = parseDur(args[0]) ?? 3600;
+  await reply(`🔎 Scanning the top famous traders of the last 7 days for day-traders (typical hold ${holdText(minHold)}+)… about 30 seconds.`);
+  const board = (await famous(env, 7)).filter(t => (t.period?.realized || 0) > 0).slice(0, 30);
+  const tracked = new Set((await getCfg(env)).wallets.map(w => w.addr));
+  const rows = [];
+  for (const t of board) {
+    try {
+      const d = await stGet(env, `/v2/pnl/wallets/${t.wallet}/positions?sort=last_trade&direction=desc&limit=100`);
+      const pos = d.positions || d.data?.positions || (Array.isArray(d.data) ? d.data : []);
+      rows.push({ t, ...traderStyle(pos) });
+    } catch (e) { rows.push({ t, err: e.message }); }
+  }
+  const ok = rows.filter(r => r.hold != null && r.closed >= 5);
+  const good = ok.filter(r => r.hold >= minHold && (r.win ?? 0) >= 0.45).sort((a, b) => (b.t.period.realized || 0) - (a.t.period.realized || 0)).slice(0, 8);
+  const line = (r, i) => {
+    const n = r.t.identity?.name || short(r.t.wallet), tw = twOf(r.t.identity?.twitter);
+    return `${i + 1}. <b>${esc(n)}</b>${tw ? ' @' + esc(tw) : ''}${tracked.has(r.t.wallet) ? ' 📌' : ''}\n` +
+      `    7d ${signedUsd(r.t.period.realized)} · holds ~${holdText(r.hold)} · win ${r.win != null ? Math.round(r.win * 100) + '%' : '?'} · ${r.perDay != null ? Math.round(r.perDay) : '?'} trades/day\n` +
+      `    <code>/add ${r.t.wallet} ${esc(n.replace(/\s+/g, ''))}</code>`;
+  };
+  if (good.length) {
+    return reply(`📋 <b>Day-traders</b> (hold ${holdText(minHold)}+, win 45%+, profitable last 7 days)\n\n` + good.map(line).join('\n\n') +
+      `\n\nTap a <code>/add</code> line to copy it, then send it. 📌 = already tracked.\nChecked ${rows.length} traders; ${ok.length} had enough closed trades to measure.`);
+  }
+  const closest = ok.sort((a, b) => b.hold - a.hold).slice(0, 5);
+  return reply(`No trader passed (hold ${holdText(minHold)}+, win 45%+). Longest holders among the top ${rows.length}:\n\n` +
+    (closest.length ? closest.map(line).join('\n\n') : 'No usable data returned. Send /raw with one address so we can check the format.') +
+    `\n\nTry a shorter hold, e.g. <code>/scan 30m</code>.`);
+}
+
 // ---------------------------------------------------------------- Telegram commands
 const HELP = `<b>SolRadar</b>
 /top — famous traders, last 24h profit
 /week — famous traders, last 7 days
+/scan · /scan 2h — find day-traders who hold 1h+ (or 2h+)
 /list — wallets being tracked
 /add &lt;wallet&gt; [name] — track a wallet
 /remove &lt;wallet or name&gt; — stop tracking
@@ -379,6 +573,7 @@ async function handleCommand(env, text, chat) {
   const reply = t => send(env, t, chat);
   switch (cmd) {
     case '/start': case '/help': return reply(HELP);
+    case '/scan': await scanCommand(env, args, reply).catch(e => reply('⚠️ Scan failed: ' + esc(e.message))); return null;
     case '/top': case '/week': return reply(await leaderboardText(env, cmd === '/top' ? 1 : 7).catch(e => '⚠️ ' + e.message));
     case '/list': {
       if (!cfg.wallets.length) return reply('No wallets yet. Use /add or /auto on.');
@@ -392,7 +587,7 @@ async function handleCommand(env, text, chat) {
       if (ex) { ex.auto = false; if (args[1]) ex.label = args.slice(1).join(' '); }
       else cfg.wallets.push({ addr: a, label: args.slice(1).join(' ') || short(a), auto: false });
       const r = await syncHook(env, cfg); await putCfg(env, cfg);
-      return reply(r.ok ? `✅ Tracking <b>${esc(args.slice(1).join(' ') || short(a))}</b>. Alerts arrive seconds after each trade.` : '⚠️ Saved, but Helius update failed: ' + esc(r.error));
+      return reply(r.ok ? `✅ Tracking <b>${esc(args.slice(1).join(' ') || short(a))}</b>. ${polling(env) ? 'Alerts arrive within about a minute.' : 'Alerts arrive seconds after each trade.'}` : '⚠️ Saved, but the feed update failed: ' + esc(r.error));
     }
     case '/remove': {
       const w = find(args.join(' '));
@@ -433,12 +628,16 @@ async function handleCommand(env, text, chat) {
     case '/status': {
       const st = await getState(env);
       let hook = 'unknown';
-      if (cfg.hookId) {
+      if (polling(env)) {
+        const f = st.feed || {};
+        const ago = f.lastRun ? fmtAge(Date.now() - f.lastRun) + ' ago' : 'not yet';
+        hook = `${f.err ? '🔴' : '🟢'} Alchemy, checked ${ago}${f.err ? ' · ' + esc(f.err) : ''}\nFeed usage today: ${f.req || 0}/${FEED_DAILY_CAP} requests`;
+      } else if (cfg.hookId) {
         const h = await fetch(`${HELIUS_API}/${cfg.hookId}?api-key=${encodeURIComponent(env.HELIUS_API_KEY)}`).then(r => r.json()).catch(() => null);
         hook = h?.webhookID ? (h.active === false ? '🔴 disabled by Helius, send /fix' : '🟢 active') : '🔴 missing, send /fix';
       } else hook = cfg.wallets.length ? '🔴 not set, send /fix' : 'waiting for first wallet';
       const last = st.trades[0];
-      return reply(`<b>Status</b>\nHelius feed: ${hook}\nWallets: ${cfg.wallets.length} (${cfg.wallets.filter(w => w.auto).length} auto)\nAlerts: ${cfg.paused ? '⏸ paused' : '▶️ on'} · min ${cfg.minSol} SOL\n` +
+      return reply(`<b>Status</b>\nTrade feed: ${hook}\nWallets: ${cfg.wallets.length} (${cfg.wallets.filter(w => w.auto).length} auto)\nAlerts: ${cfg.paused ? '⏸ paused' : '▶️ on'} · min ${cfg.minSol} SOL\n` +
         `Last trade seen: ${last ? fmtAge(Date.now() - last.time * 1000) + ' ago' : 'none yet'}\nStorage writes today: ${st.writes || 0}/${MAX_KV_WRITES}`);
     }
     case '/raw': {
@@ -456,7 +655,10 @@ async function handleCommand(env, text, chat) {
       for (const m of mints) await copySell(env, m, 1, 'you sent /sellall').catch(e => reply('⚠️ ' + esc(e.message)));
       return null;
     }
-    case '/fix': { const r = await syncHook(env, cfg); await putCfg(env, cfg); return reply(r.ok ? '🔧 Helius feed reconnected.' : '⚠️ ' + esc(r.error)); }
+    case '/fix': {
+      if (polling(env)) { const st = await getState(env); st.cur = {}; st.feed = null; await putState(env, st); return reply('🔧 Trade feed restarted: it picks up new trades from the next minute.'); }
+      const r = await syncHook(env, cfg); await putCfg(env, cfg); return reply(r.ok ? '🔧 Helius feed reconnected.' : '⚠️ ' + esc(r.error));
+    }
     default: return reply('Unknown command. Send /help');
   }
 }
@@ -471,7 +673,7 @@ async function setup(env, origin, appUrl) {
   const w = await tg(env, 'setWebhook', { url: origin + '/hook/telegram', secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true });
   out.telegram = w.ok ? 'ok' : w.description;
   await tg(env, 'setMyCommands', { commands: [
-    ['top', 'Famous traders, last 24h profit'], ['week', 'Famous traders, last 7 days'], ['list', 'Wallets being tracked'],
+    ['top', 'Famous traders, last 24h profit'], ['week', 'Famous traders, last 7 days'], ['scan', 'Find day-traders who hold longer'], ['list', 'Wallets being tracked'],
     ['add', 'Track a wallet'], ['remove', 'Stop tracking a wallet'], ['trader', 'Profit record of a wallet'],
     ['auto', 'Auto-track top famous traders'], ['min', 'Minimum trade size'], ['pause', 'Mute alerts'],
     ['resume', 'Unmute alerts'], ['status', 'Health check'], ['help', 'All commands'],
@@ -485,9 +687,9 @@ async function setup(env, origin, appUrl) {
   out.famous = auto.ok ? 'ok' : auto.error;
   const code = btoa(JSON.stringify({ u: origin, p: env.APP_PASSCODE })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const app = c2.appUrl || '';
-  const sent = await send(env, `🚀 <b>SolRadar is live</b>\n\nTracking ${c2.wallets.length} wallets. Alerts arrive seconds after each trade, 24/7.\n\n` +
+  const sent = await send(env, `🚀 <b>SolRadar is live</b>\n\nTracking ${c2.wallets.length} wallets. ${polling(env) ? 'Alerts arrive within about a minute of each trade' : 'Alerts arrive seconds after each trade'}, 24/7.\n\n` +
     `<b>Connect the iPhone app:</b>\n1. Open ${app ? `<a href="${esc(app)}">your app</a>` : 'your app'} → Settings\n2. Tap and hold the code below to copy it, then paste it in "Connection code"\n\n<code>${code}</code>\n\n` +
-    (out.famous === 'ok' ? '' : `⚠️ Famous traders: ${esc(out.famous)}\n`) + (out.helius === 'ok' ? '' : `⚠️ Helius: ${esc(out.helius)}\n`) + 'Send /help for commands.');
+    (out.famous === 'ok' ? '' : `⚠️ Famous traders: ${esc(out.famous)}\n`) + (out.helius === 'ok' ? '' : `⚠️ Trade feed: ${esc(out.helius)}\n`) + 'Send /help for commands.');
   out.message = sent.ok ? 'ok' : sent.description;
   out.ok = out.telegram === 'ok' && out.message === 'ok';
   return out;
@@ -631,7 +833,7 @@ async function signTx(b64, kp) {
 
 // ---- chain + Jupiter
 async function rpc(env, method, params) {
-  const r = await fetch(`https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`, {
+  const r = await fetch(rpcUrl(env), {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
   });
   const d = await r.json();
@@ -795,7 +997,7 @@ async function copyCommand(env, args) {
 // Remove stray spaces / new lines that can sneak in when secrets are pasted on a phone.
 function cleanEnv(env) {
   const o = { ...env };
-  for (const k of ['HELIUS_API_KEY', 'SOLANA_TRACKER_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'APP_PASSCODE', 'TRADER_PRIVATE_KEY', 'JUPITER_API_KEY'])
+  for (const k of ['HELIUS_API_KEY', 'SOLANA_TRACKER_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'APP_PASSCODE', 'TRADER_PRIVATE_KEY', 'JUPITER_API_KEY', 'ALCHEMY_API_KEY'])
     if (typeof o[k] === 'string') o[k] = o[k].replace(/\s+/g, '');
   if (o.TELEGRAM_BOT_TOKEN) o.TELEGRAM_BOT_TOKEN = o.TELEGRAM_BOT_TOKEN.replace(/^bot(?=\d)/i, '');
   return o;
@@ -809,6 +1011,7 @@ export default {
     if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     try {
       if (url.pathname === '/hook/helius' && req.method === 'POST') {
+        if (polling(env)) return new Response('ok'); // feed now comes from polling
         if (!safeEq(req.headers.get('authorization'), await hookSecret(env))) return new Response('no', { status: 401 });
         const body = await req.json();
         ctx.waitUntil(handleHelius(env, body).catch(e => console.log('helius', e.stack || e)));
@@ -837,7 +1040,13 @@ export default {
   async scheduled(event, env, ctx) {
     env = cleanEnv(env);
     env.KV = storage(env);
-    if (event.cron === '* * * * *') { ctx.waitUntil(copyMonitor(env).catch(e => console.log('monitor', e.message))); return; }
+    if (event.cron === '* * * * *') {
+      ctx.waitUntil((async () => {
+        await pollFeed(env).catch(e => console.log('poll', e.stack || e.message));
+        await copyMonitor(env).catch(e => console.log('monitor', e.message));
+      })());
+      return;
+    }
     ctx.waitUntil((async () => {
       await autoRefresh(env, true).catch(e => console.log('auto', e.message));
       if (new Date(event.scheduledTime).getUTCHours() === 4) {
