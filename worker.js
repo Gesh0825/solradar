@@ -30,6 +30,7 @@ const CORS = {
 };
 
 // ---------------------------------------------------------------- helpers
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (v, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json', ...CORS } });
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const short = a => `${a.slice(0, 4)}…${a.slice(-4)}`;
@@ -359,15 +360,11 @@ async function pollFeed(env) {
     } catch (e) { err = e.message; continue; }
     if (!sigs || !sigs.length) continue;
     if (!cur) { st.cur[w.addr] = sigs[0].signature; continue; }         // first run: start from now
-    if (sigs.length >= FEED_SIG_LIMIT) {                                  // burst: skip, warn at most hourly
-      st.cur[w.addr] = sigs[0].signature;
-      if (!feed.busy[w.addr] || Date.now() - feed.busy[w.addr] > 3600000) {
-        feed.busy[w.addr] = Date.now();
-        await send(env, `⚡ <b>${esc(w.label)}</b> made ${sigs.length}+ transactions in a minute (bot-like burst), skipped to keep the feed light.`);
-      }
-      continue;
+    let todo = sigs.filter(x => !x.err).reverse();                        // oldest first
+    if (sigs.length >= FEED_SIG_LIMIT) {                                  // burst: only the newest few are read
+      todo = todo.slice(-3);
+      feed.bursts = (feed.bursts || 0) + 1;
     }
-    const todo = sigs.filter(x => !x.err).reverse();                      // oldest first
     let last = null, all = true;
     const parsed = [];
     for (const x of todo) {
@@ -387,7 +384,7 @@ async function pollFeed(env) {
     st.cur[w.addr] = all ? sigs[0].signature : (last || cur);
   }
   feed.err = err;
-  if (err && Date.now() - (feed.errWarn || 0) > 3600000) {
+  if (err && !isRate(err) && Date.now() - (feed.errWarn || 0) > 3600000) {
     feed.errWarn = Date.now();
     await send(env, `⚠️ <b>Trade feed problem</b>: ${esc(err)}\nCheck the ALCHEMY_API_KEY secret, then send /status.`);
   }
@@ -631,7 +628,7 @@ async function handleCommand(env, text, chat) {
       if (polling(env)) {
         const f = st.feed || {};
         const ago = f.lastRun ? fmtAge(Date.now() - f.lastRun) + ' ago' : 'not yet';
-        hook = `${f.err ? '🔴' : '🟢'} Alchemy, checked ${ago}${f.err ? ' · ' + esc(f.err) : ''}\nFeed usage today: ${f.req || 0}/${FEED_DAILY_CAP} requests`;
+        hook = `${f.err && !isRate(f.err) ? '🔴' : '🟢'} Alchemy, checked ${ago}${f.err ? ' · ' + (isRate(f.err) ? 'busy, slowing down' : esc(f.err)) : ''}\nFeed usage today: ${f.req || 0}/${FEED_DAILY_CAP} requests${f.bursts ? ` · ${f.bursts} busy bursts trimmed` : ''}`;
       } else if (cfg.hookId) {
         const h = await fetch(`${HELIUS_API}/${cfg.hookId}?api-key=${encodeURIComponent(env.HELIUS_API_KEY)}`).then(r => r.json()).catch(() => null);
         hook = h?.webhookID ? (h.active === false ? '🔴 disabled by Helius, send /fix' : '🟢 active') : '🔴 missing, send /fix';
@@ -832,13 +829,25 @@ async function signTx(b64, kp) {
 }
 
 // ---- chain + Jupiter
+// Paced + retried: Alchemy's free plan limits how much can be asked per second.
+let lastRpc = 0;
+const isRate = m => /compute units per second|rate limit|too many requests|429/i.test(m || '');
 async function rpc(env, method, params) {
-  const r = await fetch(rpcUrl(env), {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-  });
-  const d = await r.json();
-  if (d.error) throw new Error(d.error.message);
-  return d.result;
+  for (let attempt = 0; ; attempt++) {
+    const wait = lastRpc + 350 - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastRpc = Date.now();
+    const r = await fetch(rpcUrl(env), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    });
+    const d = await r.json().catch(() => ({ error: { message: 'HTTP ' + r.status } }));
+    const msg = d.error?.message || (r.status === 429 ? 'rate limited (429)' : '');
+    if (msg) {
+      if (isRate(msg) && attempt < 2) { await sleep(1500 * (attempt + 1)); continue; }
+      throw new Error(msg);
+    }
+    return d.result;
+  }
 }
 const solBalance = async (env, addr) => ((await rpc(env, 'getBalance', [addr, { commitment: 'confirmed' }]))?.value || 0);
 async function rawTokenBalance(env, owner, mint) {
