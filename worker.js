@@ -512,9 +512,15 @@ function traderStyle(positions) {
 }
 
 async function scanCommand(env, args, reply) {
-  const minHold = parseDur(args[0]) ?? 3600;
-  await reply(`🔎 Scanning the top famous traders of the last 7 days for day-traders (typical hold ${holdText(minHold)}+)… about 30 seconds.`);
-  const board = (await famous(env, 7)).filter(t => (t.period?.realized || 0) > 0).slice(0, 30);
+  const a = args.map(x => x.toLowerCase());
+  const minHold = a.map(parseDur).find(v => v != null) ?? 3600;
+  const all = a.includes('all');
+  const page = Math.max(1, +(a.find(x => /^p\d+$/.test(x)) || 'p1').slice(1));
+  await reply(`🔎 Scanning ${all ? 'the most profitable wallets' : 'famous traders'} of the last 7 days (ranks ${(page - 1) * 30 + 1}–${page * 30}) for day-traders (typical hold ${holdText(minHold)}+)… about 30 seconds.`);
+  const src = all
+    ? ((await stGet(env, '/v2/pnl/leaderboard/top?days=7&sort=realized&direction=desc&limit=100&minTrades=10&excludeArbitrage=true')).traders || [])
+    : await famous(env, 7);
+  const board = src.filter(t => (t.period?.realized || 0) > 0).slice((page - 1) * 30, page * 30);
   const tracked = new Set((await getCfg(env)).wallets.map(w => w.addr));
   const rows = [];
   for (const t of board) {
@@ -539,14 +545,36 @@ async function scanCommand(env, args, reply) {
   const closest = ok.sort((a, b) => b.hold - a.hold).slice(0, 5);
   return reply(`No trader passed (hold ${holdText(minHold)}+, win 45%+). Longest holders among the top ${rows.length}:\n\n` +
     (closest.length ? closest.map(line).join('\n\n') : 'No usable data returned. Send /raw with one address so we can check the format.') +
-    `\n\nTry a shorter hold, e.g. <code>/scan 30m</code>.`);
+    `\n\nTry a shorter hold, e.g. <code>/scan 30m</code>, the next 30 with <code>/scan p2</code>, or unknown wallets with <code>/scan all</code>.`);
+}
+
+// /style <address> [address…]: trading style of specific wallets (up to 12)
+async function styleCommand(env, args, reply) {
+  const cfg = await getCfg(env);
+  const addrs = [...new Set(args.map(x => cfg.wallets.find(w => w.label.toLowerCase() === x.toLowerCase())?.addr || x).filter(x => ADDR_RE.test(x)))].slice(0, 12);
+  if (!addrs.length) return reply('Usage: /style &lt;wallet&gt; [more wallets…] (up to 12)');
+  if (addrs.length > 2) await reply(`🔎 Checking ${addrs.length} wallets… about ${addrs.length * 2} seconds.`);
+  const out = [];
+  for (const w of addrs) {
+    try {
+      const d = await stGet(env, `/v2/pnl/wallets/${w}/positions?sort=last_trade&direction=desc&limit=100`);
+      const pos = d.positions || d.data?.positions || (Array.isArray(d.data) ? d.data : []);
+      const r = traderStyle(pos);
+      const name = d.identity?.name || cfg.wallets.find(x => x.addr === w)?.label || short(w);
+      const verdict = r.hold == null ? '❔ not enough data' : r.hold >= 3600 ? '🟢 day-trader' : r.hold >= 900 ? '🟡 short swings' : '🔴 scalper';
+      out.push({ hold: r.hold ?? -1, text: `<b>${esc(name)}</b> ${verdict}\n    holds ~${holdText(r.hold)} · win ${r.win != null ? Math.round(r.win * 100) + '%' : '?'} · ${r.perDay != null ? Math.round(r.perDay) : '?'} trades/day · ${r.closed} closed\n    <code>/add ${w} ${esc(String(name).replace(/\s+/g, ''))}</code>` });
+    } catch (e) { out.push({ hold: -2, text: `<code>${short(w)}</code>: ⚠️ ${esc(e.message)}` }); }
+  }
+  out.sort((x, y) => y.hold - x.hold);
+  return reply('📊 <b>Trading style</b> (longest holders first)\n\n' + out.map(o => o.text).join('\n\n') + '\n\n🟢 1h+ · 🟡 15m–1h · 🔴 under 15m');
 }
 
 // ---------------------------------------------------------------- Telegram commands
 const HELP = `<b>SolRadar</b>
 /top — famous traders, last 24h profit
 /week — famous traders, last 7 days
-/scan · /scan 2h — find day-traders who hold 1h+ (or 2h+)
+/scan · /scan 2h · /scan p2 · /scan all — find day-traders who hold 1h+
+/style &lt;wallet&gt; [more…] — how long a wallet holds, win rate, trades/day
 /list — wallets being tracked
 /add &lt;wallet&gt; [name] — track a wallet
 /remove &lt;wallet or name&gt; — stop tracking
@@ -571,6 +599,7 @@ async function handleCommand(env, text, chat) {
   switch (cmd) {
     case '/start': case '/help': return reply(HELP);
     case '/scan': await scanCommand(env, args, reply).catch(e => reply('⚠️ Scan failed: ' + esc(e.message))); return null;
+    case '/style': await styleCommand(env, args, reply).catch(e => reply('⚠️ ' + esc(e.message))); return null;
     case '/top': case '/week': return reply(await leaderboardText(env, cmd === '/top' ? 1 : 7).catch(e => '⚠️ ' + e.message));
     case '/list': {
       if (!cfg.wallets.length) return reply('No wallets yet. Use /add or /auto on.');
@@ -670,7 +699,7 @@ async function setup(env, origin, appUrl) {
   const w = await tg(env, 'setWebhook', { url: origin + '/hook/telegram', secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true });
   out.telegram = w.ok ? 'ok' : w.description;
   await tg(env, 'setMyCommands', { commands: [
-    ['top', 'Famous traders, last 24h profit'], ['week', 'Famous traders, last 7 days'], ['scan', 'Find day-traders who hold longer'], ['list', 'Wallets being tracked'],
+    ['top', 'Famous traders, last 24h profit'], ['week', 'Famous traders, last 7 days'], ['scan', 'Find day-traders who hold longer'], ['style', 'Trading style of a wallet'], ['list', 'Wallets being tracked'],
     ['add', 'Track a wallet'], ['remove', 'Stop tracking a wallet'], ['trader', 'Profit record of a wallet'],
     ['auto', 'Auto-track top famous traders'], ['min', 'Minimum trade size'], ['pause', 'Mute alerts'],
     ['resume', 'Unmute alerts'], ['status', 'Health check'], ['help', 'All commands'],
