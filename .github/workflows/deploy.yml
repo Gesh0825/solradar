@@ -19,6 +19,7 @@ jobs:
       CF_ACCOUNT_SECRET: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TRADER_PRIVATE_KEY: ${{ secrets.TRADER_PRIVATE_KEY }}
       JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
+      ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,10 +73,11 @@ jobs:
       - name: Store your keys on Cloudflare (encrypted)
         run: |
           jq -n --arg a "$HELIUS_API_KEY" --arg b "$SOLANA_TRACKER_KEY" --arg c "$TELEGRAM_BOT_TOKEN" --arg d "$TELEGRAM_CHAT_ID" --arg e "$APP_PASSCODE" \
-            --arg f "$TRADER_PRIVATE_KEY" --arg g "$JUPITER_API_KEY" \
+            --arg f "$TRADER_PRIVATE_KEY" --arg g "$JUPITER_API_KEY" --arg h "$ALCHEMY_API_KEY" \
             '{HELIUS_API_KEY:$a, SOLANA_TRACKER_KEY:$b, TELEGRAM_BOT_TOKEN:$c, TELEGRAM_CHAT_ID:$d, APP_PASSCODE:$e}
              + (if $f != "" then {TRADER_PRIVATE_KEY:$f} else {} end)
-             + (if $g != "" then {JUPITER_API_KEY:$g} else {} end)' > secrets.json
+             + (if $g != "" then {JUPITER_API_KEY:$g} else {} end)
+             + (if $h != "" then {ALCHEMY_API_KEY:$h} else {} end)' > secrets.json
           npx --yes wrangler@4 secret bulk secrets.json
           rm -f secrets.json
 
