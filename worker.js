@@ -950,28 +950,31 @@ async function copyBuy(env, mint, info, buyers) {
   const sym = esc(info?.sym || short(mint));
   const skip = why => send(env, `⏭ <b>Copy skipped</b> $${sym}: ${why}`);
   if (!info) { await sleep(3000); info = await tokenInfo(mint, 2); }
-  if (!info) return skip('not on DexScreener yet, too new to trade safely');
-  if ((info.liq || 0) < c.minLiq) return skip(`liquidity ${usd(info.liq)} is under ${usd(c.minLiq)}`);
+  // Unlisted (very new) coins are bought too, like the traders do. The liquidity rule only
+  // applies once DexScreener knows the coin.
+  if (info && (info.liq || 0) < c.minLiq) return skip(`liquidity ${usd(info.liq)} is under ${usd(c.minLiq)}`);
+  const tsym = info?.sym || short(mint);
+  const chart = info?.url || `https://dexscreener.com/solana/${mint}`;
   if (Object.keys(c.pos).length >= c.maxOpen) return skip(`already ${c.maxOpen} open trades`);
   if (c.buysToday >= c.maxBuysPerDay) return skip(`daily limit of ${c.maxBuysPerDay} buys reached`);
   const kp = await keypair(env);
   const bal = await solBalance(env, kp.addr);
   const spend = Math.floor((bal - RESERVE_SOL * 1e9) * c.pct / 100);
   if (spend < 0.005 * 1e9) return skip(`wallet balance too low (${lamportsToSol(bal).toFixed(3)} SOL). Send SOL to <code>${kp.addr}</code>`);
-  c.pos[mint] = { sym: info.sym, pending: true, at: Date.now() }; // lock against double buys
+  c.pos[mint] = { sym: tsym, pending: true, at: Date.now() }; // lock against double buys
   c.buysToday++;
   await putCopy(env, c);
   try {
     const r = await swap(env, WSOL, mint, spend);
     try {
       const c2 = await getCopy(env);
-      c2.pos[mint] = { sym: info.sym, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
+      c2.pos[mint] = { sym: tsym, unlisted: !info, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
       await putCopy(env, c2);
     } catch (e) {
       await send(env, `🚨 <b>Bought $${sym} but couldn't save the trade</b> (${esc(e.message)}). The bot won't auto-sell it: sell it yourself in Phantom (SolRadar Bot wallet).\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
       return;
     }
-    await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${marketLine(info)}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${info.url}">Chart</a>`);
+    await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${info ? marketLine(info) : '🆕 Not on DexScreener yet: bought early, like the trader'}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${chart}">Chart</a>`);
   } catch (e) {
     const c2 = await getCopy(env); delete c2.pos[mint]; await putCopy(env, c2);
     await send(env, `⚠️ <b>Copy buy failed</b> $${sym}: ${esc(e.message)}`);
