@@ -104,16 +104,22 @@ const send = (env, text, chat = env.TELEGRAM_CHAT_ID) =>
   tg(env, 'sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true });
 
 // ---------------------------------------------------------------- market data
-async function tokenInfo(mint) {
-  try {
-    const r = await fetch(`${DS}/tokens/v1/solana/${mint}`, { cf: { cacheTtl: 30 } });
-    const pairs = await r.json();
-    const p = (pairs || []).filter(x => x.baseToken?.address === mint)
-      .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-    if (!p) return null;
-    return { sym: p.baseToken.symbol, name: p.baseToken.name, price: +p.priceUsd, mc: p.marketCap || p.fdv, liq: p.liquidity?.usd,
-      created: p.pairCreatedAt, url: p.url, h1: p.priceChange?.h1, img: p.info?.imageUrl || '' };
-  } catch { return null; }
+// Returns null only when DexScreener really has no pair. A failed lookup (rate limit, network)
+// is retried, so a listed coin is never mistaken for a brand-new one.
+async function tokenInfo(mint, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(`${DS}/tokens/v1/solana/${mint}`, i ? {} : { cf: { cacheTtl: 30 } });
+      const pairs = r.ok ? await r.json() : null;
+      if (!Array.isArray(pairs)) throw new Error('DexScreener ' + r.status);
+      const p = pairs.filter(x => x.baseToken?.address === mint)
+        .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+      if (!p) return null;
+      return { sym: p.baseToken.symbol, name: p.baseToken.name, price: +p.priceUsd, mc: p.marketCap || p.fdv, liq: p.liquidity?.usd,
+        created: p.pairCreatedAt, url: p.url, h1: p.priceChange?.h1, img: p.info?.imageUrl || '' };
+    } catch { if (i < tries - 1) await sleep(1500 * (i + 1)); }
+  }
+  return null;
 }
 function marketLine(i) {
   if (!i) return '📊 Not on DexScreener yet (very new)';
@@ -424,7 +430,13 @@ async function maybeCluster(env, cfg, st, mint, info, exited) {
   for (const [m, t] of Object.entries(st.clusters)) if (now - t > 86400) delete st.clusters[m];
   const names = buyers.map(a => cfg.wallets.find(w => w.addr === a)).filter(Boolean).map(w => '• ' + who(w)).join('\n');
   if (!cfg.paused) await send(env, `🔥 <b>CLUSTER BUY</b> $${esc(info?.sym || short(mint))}\n${buyers.length} tracked traders bought within 1 hour:\n${names}\n${marketLine(info)}\n🔗 <a href="${info?.url || `https://dexscreener.com/solana/${mint}`}">Chart</a>\n<code>${mint}</code>`);
-  // Cluster = alert only. Copy-trading now follows the traders you pick with /copy add.
+  // Second chance: if a trader on your copy list is part of this cluster, copy it now
+  // (e.g. their own buy was skipped because the coin wasn't listed yet).
+  const c = await getCopy(env);
+  const mine = buyers.filter(a => (c.who || []).includes(a));
+  if (!c.on || !mine.length || c.pos[mint]) return;
+  if (exited || mine.some(a => st.pos[a] && !st.pos[a][mint])) return;
+  await copyBuy(env, mint, info, mine).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
 }
 
 // Copy a single buy from a trader on your copy list (/copy add).
@@ -937,6 +949,7 @@ async function copyBuy(env, mint, info, buyers) {
   if (!c.on || c.pos[mint]) return;
   const sym = esc(info?.sym || short(mint));
   const skip = why => send(env, `⏭ <b>Copy skipped</b> $${sym}: ${why}`);
+  if (!info) { await sleep(3000); info = await tokenInfo(mint, 2); }
   if (!info) return skip('not on DexScreener yet, too new to trade safely');
   if ((info.liq || 0) < c.minLiq) return skip(`liquidity ${usd(info.liq)} is under ${usd(c.minLiq)}`);
   if (Object.keys(c.pos).length >= c.maxOpen) return skip(`already ${c.maxOpen} open trades`);
