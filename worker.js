@@ -263,7 +263,10 @@ async function ingest(env, cfg, st, seen, w, t) {
   }
 
   if (!cfg.paused && !(t.quote === 'SOL' && t.amount < cfg.minSol)) await send(env, alertText(w, rec, info, pnlLine));
-  if (t.side === 'BUY') await maybeCluster(env, cfg, st, t.mint, info, t.exited);
+  if (t.side === 'BUY') {
+    await maybeCluster(env, cfg, st, t.mint, info, t.exited);
+    await maybeCopyTrader(env, st, w, t, info);
+  }
   else await copyFollowSell(env, addr, t).catch(e => send(env, '⚠️ Copy-sell error: ' + esc(e.message)));
   return { changed: true };
 }
@@ -421,10 +424,19 @@ async function maybeCluster(env, cfg, st, mint, info, exited) {
   for (const [m, t] of Object.entries(st.clusters)) if (now - t > 86400) delete st.clusters[m];
   const names = buyers.map(a => cfg.wallets.find(w => w.addr === a)).filter(Boolean).map(w => '• ' + who(w)).join('\n');
   if (!cfg.paused) await send(env, `🔥 <b>CLUSTER BUY</b> $${esc(info?.sym || short(mint))}\n${buyers.length} tracked traders bought within 1 hour:\n${names}\n${marketLine(info)}\n🔗 <a href="${info?.url || `https://dexscreener.com/solana/${mint}`}">Chart</a>\n<code>${mint}</code>`);
-  // don't copy if a trader who triggered it has already fully exited the coin
-  const gone = exited || buyers.some(a => st.pos[a] && !st.pos[a][mint]);
-  if (gone) { if ((await getCopy(env)).on) await send(env, `⏭ <b>Copy skipped</b> $${esc(info?.sym || short(mint))}: a trader already sold it again.`); return; }
-  await copyBuy(env, mint, info, buyers).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
+  // Cluster = alert only. Copy-trading now follows the traders you pick with /copy add.
+}
+
+// Copy a single buy from a trader on your copy list (/copy add).
+async function maybeCopyTrader(env, st, w, t, info) {
+  const c = await getCopy(env);
+  if (!c.on || !(c.who || []).includes(w.addr)) return;
+  const sym = esc(info?.sym || short(t.mint));
+  if (t.exited || (st.pos[w.addr] && !st.pos[w.addr][t.mint])) {
+    await send(env, `⏭ <b>Copy skipped</b> $${sym}: ${esc(w.label)} already sold it again.`);
+    return;
+  }
+  await copyBuy(env, t.mint, info, [w.addr]).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
 }
 
 // ---------------------------------------------------------------- famous traders
@@ -593,6 +605,8 @@ const HELP = `<b>SolRadar</b>
 
 <b>Auto copy-trading</b>
 /copy — wallet, balance, open trades, profit
+/copy add Pain rayan — pick which tracked traders to copy
+/copy remove Pain — stop copying a trader
 /copy on · /copy off — start or stop auto-buying
 /copy size 10 — % of balance per trade
 /sellall — sell every open copy trade now`;
@@ -782,17 +796,17 @@ async function api(env, req, url) {
 
 
 // ================================================================ AUTO COPY-TRADING
-// Buys when 2+ tracked traders buy the same coin within 1 hour (cluster), using a % of the
+// Buys when a trader on your copy list (/copy add) buys a coin, using a % of the
 // bot wallet's SOL. Sells when those traders sell, at +TP% (half), at -SL% (all) or after max hours.
 // Needs secrets TRADER_PRIVATE_KEY (a separate small wallet) and JUPITER_API_KEY. Off until /copy on.
 const JUP = 'https://api.jup.ag/swap/v2';
-const COPY_DEFAULT = { on: false, pct: 10, maxOpen: 5, minLiq: 20000, tp: 100, sl: 40, maxHours: 24, maxBuysPerDay: 10,
+const COPY_DEFAULT = { on: false, who: [], pct: 10, maxOpen: 5, minLiq: 20000, tp: 100, sl: 40, maxHours: 24, maxBuysPerDay: 10,
   pos: {}, closed: [], realized: 0, day: '', buysToday: 0 };
 const RESERVE_SOL = 0.01; // left for network fees and token-account rent
 
 async function getCopy(env) {
   const c = { ...COPY_DEFAULT, ...((await env.KV.get('copy', 'json')) || {}) };
-  c.pos ||= {}; c.closed ||= [];
+  c.pos ||= {}; c.closed ||= []; c.who ||= [];
   if (c.day !== today()) { c.day = today(); c.buysToday = 0; }
   return c;
 }
@@ -1011,6 +1025,11 @@ async function copyMonitor(env) {
 }
 
 // ---- /copy command
+async function copyNames(env, c) {
+  if (!c.who.length) return 'nobody yet (send /copy add &lt;name&gt;)';
+  const cfg = await getCfg(env);
+  return c.who.map(a => esc(cfg.wallets.find(w => w.addr === a)?.label || short(a)) + (cfg.wallets.some(w => w.addr === a) ? '' : ' (not tracked)')).join(', ');
+}
 async function copyCommand(env, args) {
   const c = await getCopy(env);
   const a = (args[0] || '').toLowerCase();
@@ -1021,9 +1040,27 @@ async function copyCommand(env, args) {
       if (!env.JUPITER_API_KEY) return '⚠️ Add the JUPITER_API_KEY secret in GitHub, then re-run the workflow.';
     }
     c.on = a === 'on'; await putCopy(env, c);
+    const whoTxt = await copyNames(env, c);
     return c.on
-      ? `🤖 <b>Copy-trading ON</b>\nBuys ${c.pct}% of the wallet balance when 2+ of your traders buy the same coin within 1 hour.\nSells when they sell, +${c.tp}% (half), −${c.sl}% (all) or after ${c.maxHours}h.\nSend /copy off to stop.`
+      ? `🤖 <b>Copy-trading ON</b>\nCopying: ${whoTxt}\nEach time one of them buys, the bot buys ${c.pct}% of the wallet balance.\nSells when that trader sells, +${c.tp}% (half), −${c.sl}% (all) or after ${c.maxHours}h.${c.who.length ? '' : '\n\n⚠️ Nobody picked yet. Send /copy add Pain (any name from /list).'}\nSend /copy off to stop.`
       : '⏸ Copy-trading OFF. Open trades are still managed (TP/SL/time). Send /sellall to close them now.';
+  }
+  if (a === 'add' || a === 'remove') {
+    const cfg = await getCfg(env);
+    const q = args.slice(1);
+    if (!q.length) return `Usage: /copy ${a} Pain rayan  (names from /list, or wallet addresses)`;
+    const match = s => cfg.wallets.find(w => w.addr === s || w.label.toLowerCase() === s.toLowerCase() || (s.length >= 4 && w.addr.startsWith(s)));
+    let hits = q.map(match);
+    if (hits.some(h => !h) && match(q.join(' '))) hits = [match(q.join(' '))];
+    const bad = q.filter((s, i) => hits.length === q.length && !hits[i]);
+    const found = [...new Set(hits.filter(Boolean))];
+    if (!found.length) return `Not found: ${esc(q.join(' '))}. Use a name from /list (only tracked traders can be copied).`;
+    for (const w of found) {
+      if (a === 'add' && !c.who.includes(w.addr)) c.who.push(w.addr);
+      if (a === 'remove') c.who = c.who.filter(x => x !== w.addr);
+    }
+    await putCopy(env, c);
+    return `${a === 'add' ? '✅ Now copying' : '🗑 Stopped copying'}: ${found.map(w => esc(w.label)).join(', ')}${bad.length ? `\nNot found: ${esc(bad.join(', '))}` : ''}\n\nCopy list: ${await copyNames(env, c)}${c.on ? '' : '\nCopy-trading is OFF. Send /copy on to start.'}`;
   }
   if (a === 'size') {
     const v = parseFloat(args[1]);
@@ -1035,7 +1072,7 @@ async function copyCommand(env, args) {
   try { const kp = await keypair(env); wallet = `<code>${kp.addr}</code>`; bal = `${lamportsToSol(await solBalance(env, kp.addr)).toFixed(4)} SOL`; } catch {}
   const open = Object.entries(c.pos).map(([m, p]) => `• $${esc(p.sym || short(m))}: ${p.pending ? 'buying…' : (p.sol || 0).toFixed(4) + ' SOL in, ' + fmtAge(Date.now() - p.at) + ' ago'}`).join('\n') || 'none';
   const last = c.closed.slice(0, 5).map(x => `• $${esc(x.sym)}: ${(x.back - x.sol) >= 0 ? '+' : ''}${(x.back - x.sol).toFixed(4)} SOL`).join('\n') || 'none yet';
-  return `🤖 <b>Copy-trading ${c.on ? 'ON' : 'OFF'}</b>\nWallet: ${wallet}\nBalance: ${bal || '?'}\nSize: ${c.pct}% per trade · max ${c.maxOpen} open · ${c.buysToday}/${c.maxBuysPerDay} buys today\n\n<b>Open</b>\n${open}\n\n<b>Last closed</b>\n${last}\n\nTotal copy profit: ${(c.realized || 0) >= 0 ? '+' : ''}${(c.realized || 0).toFixed(4)} SOL`;
+  return `🤖 <b>Copy-trading ${c.on ? 'ON' : 'OFF'}</b>\nCopying: ${await copyNames(env, c)}\nWallet: ${wallet}\nBalance: ${bal || '?'}\nSize: ${c.pct}% per trade · max ${c.maxOpen} open · ${c.buysToday}/${c.maxBuysPerDay} buys today\n\n<b>Open</b>\n${open}\n\n<b>Last closed</b>\n${last}\n\nTotal copy profit: ${(c.realized || 0) >= 0 ? '+' : ''}${(c.realized || 0).toFixed(4)} SOL`;
 }
 
 // ---------------------------------------------------------------- entry
