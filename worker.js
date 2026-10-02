@@ -1045,19 +1045,32 @@ async function edSign(kp, msg) {
 async function closeBatch(env, kp, program, accts) {
   const bh = (await rpc(env, 'getLatestBlockhash', [{ commitment: 'confirmed' }]))?.value?.blockhash;
   if (!bh) throw new Error('no blockhash');
-  const keys = [kp.pub, ...accts.map(a => b58decode(a)), b58decode(program)];
-  const pi = keys.length - 1;
-  const ix = accts.flatMap((_, i) => [pi, ...cu16enc(3), i + 1, 0, 0, ...cu16enc(1), 9]); // CloseAccount(account, dest=owner, owner)
-  const msg = new Uint8Array([1, 0, 1, ...cu16enc(keys.length), ...keys.flatMap(k => [...k]), ...b58decode(bh), ...cu16enc(accts.length), ...ix]);
+  const keys = [kp.pub, ...accts.map(a => b58decode(a)), b58decode(program), b58decode('ComputeBudget111111111111111111111111111111')];
+  const pi = keys.length - 2, cb = keys.length - 1;
+  const le = (n, bytes) => Array.from({ length: bytes }, (_, i) => Number((BigInt(n) >> BigInt(8 * i)) & 0xffn));
+  const ix = [
+    cb, 0, ...cu16enc(5), 2, ...le(5000 * accts.length + 2000, 4),      // compute limit
+    cb, 0, ...cu16enc(9), 3, ...le(500000, 8),                          // priority fee (~0.00002 SOL) so it lands
+    ...accts.flatMap((_, i) => [pi, ...cu16enc(3), i + 1, 0, 0, ...cu16enc(1), 9]), // CloseAccount(account, dest=owner, owner)
+  ];
+  const msg = new Uint8Array([1, 0, 2, ...cu16enc(keys.length), ...keys.flatMap(k => [...k]), ...b58decode(bh), ...cu16enc(accts.length + 2), ...ix]);
   const sig = await edSign(kp, msg);
   const tx = new Uint8Array([...cu16enc(1), ...sig, ...msg]);
-  return rpc(env, 'sendTransaction', [b64e(tx), { encoding: 'base64', preflightCommitment: 'confirmed' }]);
+  const txSig = await rpc(env, 'sendTransaction', [b64e(tx), { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 5 }]);
+  // Wait until the network confirms it (or says it failed).
+  for (let i = 0; i < 12; i++) {
+    await sleep(1500);
+    const st = (await rpc(env, 'getSignatureStatuses', [[txSig], { searchTransactionHistory: false }]).catch(() => null))?.value?.[0];
+    if (st?.err) throw new Error('cleanup transaction failed on-chain');
+    if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return txSig;
+  }
+  throw new Error('cleanup not confirmed yet (network busy)');
 }
 // Closes every empty coin account in the bot wallet (skips coins with open trades). Returns SOL recovered.
 async function reclaimRent(env) {
   const kp = await keypair(env);
   const c = await getCopy(env);
-  let lamports = 0, closed = 0;
+  let lamports = 0, closed = 0, lastErr = '';
   for (const program of TOKEN_PROGRAMS) {
     const r = await rpc(env, 'getTokenAccountsByOwner', [kp.addr, { programId: program }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
     const empty = (r?.value || []).filter(a => {
@@ -1069,10 +1082,10 @@ async function reclaimRent(env) {
       try {
         await closeBatch(env, kp, program, part.map(a => a.pubkey));
         lamports += part.reduce((s, a) => s + (a.account.lamports || 0), 0); closed += part.length;
-      } catch (e) { console.log('reclaim', e.message); }
+      } catch (e) { console.log('reclaim', e.message); lastErr = e.message; }
     }
   }
-  return { sol: lamports / 1e9, closed };
+  return { sol: lamports / 1e9, closed, err: lastErr };
 }
 
 // ---- sell (fraction 0..1)
@@ -1109,7 +1122,7 @@ async function copySell(env, mint, fraction, reason, tr = null) {
     cmp += tr?.px ? `🚪 Exit MC: ${who} ${mcText(tr.px, supply, sol)} · You ${mcText(outPx, supply, sol)}\n` : `🚪 Your exit MC: ${mcText(outPx, supply, sol)}\n`;
     if (tr?.pct != null && myPct != null) cmp += `⚖️ Profit: ${who} ${pctTxt(tr.pct)} · You ${pctTxt(myPct)}\n`;
   } catch {}
-  if (fraction >= 1) { await sleep(1500); const rr = await reclaimRent(env).catch(() => null); if (rr?.closed) cmp += `♻️ Got back ${rr.sol.toFixed(4)} SOL account deposit\n`; }
+  if (fraction >= 1) { const c3 = await getCopy(env); c3.cleanup = true; await putCopy(env, c3); cmp += '♻️ The ~0.002 SOL account deposit comes back within ~10 min\n'; }
   await send(env, `🤖🔴 <b>COPY SELL ${fraction >= 1 ? 'ALL' : Math.round(fraction * 100) + '%'}</b> $${esc(q.sym || short(mint))}\nReason: ${esc(reason)}\n💰 Got ${got.toFixed(4)} SOL · ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${costPart > 0 ? ((pnl / costPart) * 100).toFixed(0) : '?'}%)\n${cmp}📊 Total copy profit: ${c2.realized >= 0 ? '+' : ''}${c2.realized.toFixed(4)} SOL\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
 }
 
@@ -1188,7 +1201,8 @@ async function copyCommand(env, args) {
   }
   if (a === 'cleanup') {
     const rr = await reclaimRent(env);
-    return rr.closed ? `♻️ Closed ${rr.closed} empty coin accounts and got back about ${rr.sol.toFixed(4)} SOL. Check /copy in a minute.` : '♻️ Nothing to clean: no empty coin accounts.';
+    if (rr.closed) return `♻️ Confirmed: closed ${rr.closed} empty coin accounts and got back ${rr.sol.toFixed(4)} SOL.${rr.err ? `\n⚠️ Some didn't go through (${esc(rr.err)}). Send /copy cleanup again.` : ''}`;
+    return rr.err ? `⚠️ Cleanup didn't go through: ${esc(rr.err)}. Try /copy cleanup again in a minute.` : '♻️ Nothing to clean: no empty coin accounts.';
   }
   if (a === 'chase') {
     const v = parseFloat(args[1]);
@@ -1261,6 +1275,19 @@ export default {
     env = cleanEnv(env);
     env.KV = storage(env);
     if (event.cron === '* * * * *') {
+      // Every 10 minutes, if a coin was fully sold, close its empty account to get the deposit back.
+      // Runs on its own in that minute so it can't use up the minute's request budget.
+      if (new Date(event.scheduledTime).getUTCMinutes() % 10 === 5) {
+        const c = await getCopy(env).catch(() => null);
+        if (c?.cleanup) {
+          ctx.waitUntil((async () => {
+            const rr = await reclaimRent(env).catch(e => ({ closed: 0, err: e.message }));
+            if (!rr.err) { const c2 = await getCopy(env); c2.cleanup = false; await putCopy(env, c2); }
+            if (rr.closed) await send(env, `♻️ Got back ${rr.sol.toFixed(4)} SOL from ${rr.closed} empty coin account${rr.closed > 1 ? 's' : ''}.`);
+          })());
+          return;
+        }
+      }
       ctx.waitUntil((async () => {
         await pollFeed(env).catch(e => console.log('poll', e.stack || e.message));
         await copyMonitor(env).catch(e => console.log('monitor', e.message));
