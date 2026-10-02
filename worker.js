@@ -263,6 +263,7 @@ async function ingest(env, cfg, st, seen, w, t) {
     if (pos.cost > 0 && pos.q === t.quote) {
       const out = pos.cost * frac, pnl = t.amount - out; pos.cost -= out;
       const pct = out > 0 ? (pnl / out) * 100 : 0;
+      t.pnlPct = pct;
       pnlLine = `📈 Profit on this sell: ${pnl >= 0 ? '+' : ''}${t.quote === 'SOL' ? pnl.toFixed(2) + ' SOL' : signedUsd(pnl)} (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)\n`;
     }
     if (t.post != null && t.post <= (t.pre || 0) * 0.01) delete st.pos[addr][t.mint]; else st.pos[addr][t.mint] = pos;
@@ -436,7 +437,10 @@ async function maybeCluster(env, cfg, st, mint, info, exited) {
   const mine = buyers.filter(a => (c.who || []).includes(a));
   if (!c.on || !mine.length || c.pos[mint]) return;
   if (exited || mine.some(a => st.pos[a] && !st.pos[a][mint])) return;
-  await copyBuy(env, mint, info, mine).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
+  const who = mine[0];
+  const last = st.trades.find(x => x.wallet === who && x.mint === mint && x.side === 'BUY');
+  const ref = traderRef(st, who, cfg.wallets.find(w => w.addr === who)?.label || short(who), mint, last);
+  await copyBuy(env, mint, info, mine, ref).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
 }
 
 // Copy a single buy from a trader on your copy list (/copy add).
@@ -448,7 +452,16 @@ async function maybeCopyTrader(env, st, w, t, info) {
     await send(env, `⏭ <b>Copy skipped</b> $${sym}: ${esc(w.label)} already sold it again.`);
     return;
   }
-  await copyBuy(env, t.mint, info, [w.addr]).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
+  await copyBuy(env, t.mint, info, [w.addr], traderRef(st, w.addr, w.label, t.mint, t)).catch(e => send(env, '⚠️ Copy-buy error: ' + esc(e.message)));
+}
+
+// The trader's price per token (in SOL): their average entry if known, and this buy's price.
+function traderRef(st, addr, name, mint, buy) {
+  if (!buy || buy.quote !== 'SOL' || !(buy.tokens > 0)) return { name };
+  const last = buy.amount / buy.tokens;
+  const pos = st.pos[addr]?.[mint];
+  const avg = pos && pos.q === 'SOL' && pos.cost > 0 && buy.post > 0 ? pos.cost / buy.post : last;
+  return { name, last, avg };
 }
 
 // ---------------------------------------------------------------- famous traders
@@ -621,6 +634,8 @@ const HELP = `<b>SolRadar</b>
 /copy remove Pain — stop copying a trader
 /copy on · /copy off — start or stop auto-buying
 /copy size 10 — % of balance per trade
+/copy chase 20 — skip if price is 20%+ above the trader's entry
+/copy daily 10 — max copy buys per day
 /sellall — sell every open copy trade now`;
 
 async function handleCommand(env, text, chat) {
@@ -812,7 +827,7 @@ async function api(env, req, url) {
 // bot wallet's SOL. Sells when those traders sell, at +TP% (half), at -SL% (all) or after max hours.
 // Needs secrets TRADER_PRIVATE_KEY (a separate small wallet) and JUPITER_API_KEY. Off until /copy on.
 const JUP = 'https://api.jup.ag/swap/v2';
-const COPY_DEFAULT = { on: false, who: [], pct: 10, maxOpen: 5, minLiq: 20000, tp: 100, sl: 40, maxHours: 24, maxBuysPerDay: 10,
+const COPY_DEFAULT = { on: false, who: [], chase: 20, pct: 10, maxOpen: 5, minLiq: 20000, tp: 100, sl: 40, maxHours: 24, maxBuysPerDay: 10,
   pos: {}, closed: [], realized: 0, day: '', buysToday: 0 };
 const RESERVE_SOL = 0.01; // left for network fees and token-account rent
 
@@ -924,9 +939,11 @@ async function jupOrder(env, inputMint, outputMint, amount, taker) {
   if (!r.ok || d.errorCode || d.error) throw new Error(`Jupiter: ${d.errorMessage || d.error || r.status}`);
   return d;
 }
-async function swap(env, inputMint, outputMint, amount) {
+// check(order) runs on Jupiter's quote before anything is signed; it can throw to cancel.
+async function swap(env, inputMint, outputMint, amount, check) {
   const kp = await keypair(env);
   const o = await jupOrder(env, inputMint, outputMint, amount, kp.addr);
+  if (check) check(o);
   if (!o.transaction) throw new Error('Jupiter returned no transaction' + (o.errorMessage ? ': ' + o.errorMessage : ''));
   const signed = await signTx(o.transaction, kp);
   const r = await fetch(`${JUP}/execute`, {
@@ -943,8 +960,28 @@ async function swap(env, inputMint, outputMint, amount) {
 }
 const lamportsToSol = l => Number(l) / 1e9;
 
+// ---- prices shown as market cap, so they match what DexScreener / GMGN show
+async function mintInfo(env, mint) {
+  try { const v = (await rpc(env, 'getTokenSupply', [mint]))?.value; return { dec: v.decimals, supply: Number(v.uiAmountString || v.uiAmount || 0) }; }
+  catch { return { dec: 6, supply: 0 }; }
+}
+let SOLUSD = { v: 0, at: 0 };
+async function solUsd() {
+  if (Date.now() - SOLUSD.at < 300000 && SOLUSD.v) return SOLUSD.v;
+  const i = await tokenInfo(WSOL, 2);
+  if (i?.price) SOLUSD = { v: i.price, at: Date.now() };
+  return SOLUSD.v;
+}
+// price in SOL per token -> "$81.2K" market cap (or "412 SOL" if the SOL price is unknown)
+function mcText(px, supply, sol) {
+  if (!(px > 0) || !(supply > 0)) return '?';
+  const mcSol = px * supply;
+  return sol ? usd(mcSol * sol) : `${mcSol.toFixed(mcSol < 10 ? 2 : 0)} SOL`;
+}
+const pctTxt = v => `${v >= 0 ? '+' : ''}${v.toFixed(0)}%`;
+
 // ---- buy on cluster
-async function copyBuy(env, mint, info, buyers) {
+async function copyBuy(env, mint, info, buyers, ref = {}) {
   const c = await getCopy(env);
   if (!c.on || c.pos[mint]) return;
   const sym = esc(info?.sym || short(mint));
@@ -961,28 +998,42 @@ async function copyBuy(env, mint, info, buyers) {
   const bal = await solBalance(env, kp.addr);
   const spend = Math.floor((bal - RESERVE_SOL * 1e9) * c.pct / 100);
   if (spend < 0.005 * 1e9) return skip(`wallet balance too low (${lamportsToSol(bal).toFixed(3)} SOL). Send SOL to <code>${kp.addr}</code>`);
+  const mi = await mintInfo(env, mint);
+  const refPx = ref.avg || ref.last || 0;
+  // Don't chase: skip if the bot would pay much more per token than the trader did.
+  const check = o => {
+    const out = Number(o.outAmount || 0) / 10 ** mi.dec;
+    if (!refPx || !(out > 0)) return;
+    const diff = ((spend / 1e9) / out / refPx - 1) * 100;
+    if (diff > c.chase) { const e = new Error(`price is already ${pctTxt(diff)} above ${ref.name}'s entry (limit +${c.chase}%)`); e.skip = true; throw e; }
+  };
   c.pos[mint] = { sym: tsym, pending: true, at: Date.now() }; // lock against double buys
   c.buysToday++;
   await putCopy(env, c);
   try {
-    const r = await swap(env, WSOL, mint, spend);
+    const r = await swap(env, WSOL, mint, spend, check);
+    const myPx = lamportsToSol(r.inAmt) / (Number(r.outAmt) / 10 ** mi.dec);
+    const sol = await solUsd().catch(() => 0);
     try {
       const c2 = await getCopy(env);
-      c2.pos[mint] = { sym: tsym, unlisted: !info, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
+      c2.pos[mint] = { sym: tsym, unlisted: !info, dec: mi.dec, supply: mi.supply, px: myPx, tpx: refPx, who: ref.name, sol: lamportsToSol(r.inAmt), cost0: lamportsToSol(r.inAmt), raw: r.outAmt.toString(), at: Date.now(), buyers, tpDone: false, peak: 0 };
       await putCopy(env, c2);
     } catch (e) {
       await send(env, `🚨 <b>Bought $${sym} but couldn't save the trade</b> (${esc(e.message)}). The bot won't auto-sell it: sell it yourself in Phantom (SolRadar Bot wallet).\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
       return;
     }
-    await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${info ? marketLine(info) : '🆕 Not on DexScreener yet: bought early, like the trader'}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${chart}">Chart</a>`);
+    const vs = refPx ? `📍 Entry MC: ${esc(ref.name)} ${mcText(refPx, mi.supply, sol)} · You ${mcText(myPx, mi.supply, sol)} (${pctTxt((myPx / refPx - 1) * 100)})\n` : `📍 Your entry MC: ${mcText(myPx, mi.supply, sol)}\n`;
+    await send(env, `🤖🟢 <b>COPY BUY</b> $${sym}${ref.name ? ' · copying ' + esc(ref.name) : ''}\n💰 ${lamportsToSol(r.inAmt).toFixed(4)} SOL (${c.pct}% of balance)\n${vs}${info ? marketLine(info) : '🆕 Not on DexScreener yet: bought early, like the trader'}\n🎯 Sell: when traders sell · +${c.tp}% half · −${c.sl}% all · ${c.maxHours}h\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a> · <a href="${chart}">Chart</a>`);
   } catch (e) {
-    const c2 = await getCopy(env); delete c2.pos[mint]; await putCopy(env, c2);
-    await send(env, `⚠️ <b>Copy buy failed</b> $${sym}: ${esc(e.message)}`);
+    const c2 = await getCopy(env); delete c2.pos[mint];
+    c2.buysToday = Math.max(0, c2.buysToday - 1); // a skipped or failed buy spends nothing, so it doesn't count
+    await putCopy(env, c2);
+    await send(env, e.skip ? `⏭ <b>Copy skipped</b> $${sym}: ${esc(e.message)}` : `⚠️ <b>Copy buy failed</b> $${sym}: ${esc(e.message)}`);
   }
 }
 
 // ---- sell (fraction 0..1)
-async function copySell(env, mint, fraction, reason) {
+async function copySell(env, mint, fraction, reason, tr = null) {
   const c = await getCopy(env);
   const p = c.pos[mint];
   if (!p || p.pending) return;
@@ -1004,7 +1055,18 @@ async function copySell(env, mint, fraction, reason) {
     c2.closed.length = Math.min(c2.closed.length, 30);
   } else { q.sol -= costPart; q.back = (q.back || 0) + got; q.tpDone = true; q.raw = (have - amount).toString(); c2.pos[mint] = q; }
   await putCopy(env, c2);
-  await send(env, `🤖🔴 <b>COPY SELL ${fraction >= 1 ? 'ALL' : Math.round(fraction * 100) + '%'}</b> $${esc(q.sym || short(mint))}\nReason: ${esc(reason)}\n💰 Got ${got.toFixed(4)} SOL · ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${costPart > 0 ? ((pnl / costPart) * 100).toFixed(0) : '?'}%)\n📊 Total copy profit: ${c2.realized >= 0 ? '+' : ''}${c2.realized.toFixed(4)} SOL\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
+  // Side-by-side with the trader: entry and exit market cap, and profit %.
+  let cmp = '';
+  try {
+    const dec = q.dec ?? 6, supply = q.supply || 0, sol = await solUsd().catch(() => 0);
+    const outPx = got / (Number(amount) / 10 ** dec);
+    const who = esc(q.who || 'Trader');
+    const myPct = costPart > 0 ? (pnl / costPart) * 100 : null;
+    if (q.px) cmp += q.tpx ? `📍 Entry MC: ${who} ${mcText(q.tpx, supply, sol)} · You ${mcText(q.px, supply, sol)}\n` : `📍 Your entry MC: ${mcText(q.px, supply, sol)}\n`;
+    cmp += tr?.px ? `🚪 Exit MC: ${who} ${mcText(tr.px, supply, sol)} · You ${mcText(outPx, supply, sol)}\n` : `🚪 Your exit MC: ${mcText(outPx, supply, sol)}\n`;
+    if (tr?.pct != null && myPct != null) cmp += `⚖️ Profit: ${who} ${pctTxt(tr.pct)} · You ${pctTxt(myPct)}\n`;
+  } catch {}
+  await send(env, `🤖🔴 <b>COPY SELL ${fraction >= 1 ? 'ALL' : Math.round(fraction * 100) + '%'}</b> $${esc(q.sym || short(mint))}\nReason: ${esc(reason)}\n💰 Got ${got.toFixed(4)} SOL · ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${costPart > 0 ? ((pnl / costPart) * 100).toFixed(0) : '?'}%)\n${cmp}📊 Total copy profit: ${c2.realized >= 0 ? '+' : ''}${c2.realized.toFixed(4)} SOL\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
 }
 
 // ---- follow the traders out
@@ -1016,7 +1078,8 @@ async function copyFollowSell(env, trader, t) {
   if (frac < 0.5) return; // ignore small trims
   const cfg = await getCfg(env);
   const name = cfg.wallets.find(w => w.addr === trader)?.label || short(trader);
-  await copySell(env, t.mint, 1, `${name} sold ${Math.round(Math.min(1, frac) * 100)}% of their position`);
+  const tr = { px: t.quote === 'SOL' && t.tokens > 0 ? t.amount / t.tokens : 0, pct: t.pnlPct ?? null };
+  await copySell(env, t.mint, 1, `${name} sold ${Math.round(Math.min(1, frac) * 100)}% of their position`, tr);
 }
 
 // ---- every minute: take profit / stop loss / time limit
@@ -1078,6 +1141,16 @@ async function copyCommand(env, args) {
     await putCopy(env, c);
     return `${a === 'add' ? '✅ Now copying' : '🗑 Stopped copying'}: ${found.map(w => esc(w.label)).join(', ')}${bad.length ? `\nNot found: ${esc(bad.join(', '))}` : ''}\n\nCopy list: ${await copyNames(env, c)}${c.on ? '' : '\nCopy-trading is OFF. Send /copy on to start.'}`;
   }
+  if (a === 'chase') {
+    const v = parseFloat(args[1]);
+    if (!(v >= 0 && v <= 500)) return `Usage: /copy chase 20  (skip a buy if the price is more than 20% above the trader's entry). Now: +${c.chase}%`;
+    c.chase = v; await putCopy(env, c); return `✅ The bot now skips a copy if the price is more than +${v}% above the trader's entry.`;
+  }
+  if (a === 'daily') {
+    const v = parseInt(args[1]);
+    if (!(v >= 1 && v <= 50)) return `Usage: /copy daily 20  (max copy buys per day, 1–50). Now: ${c.maxBuysPerDay}`;
+    c.maxBuysPerDay = v; await putCopy(env, c); return `✅ Up to ${v} copy buys per day.`;
+  }
   if (a === 'size') {
     const v = parseFloat(args[1]);
     if (!(v >= 1 && v <= 50)) return 'Usage: /copy size 10  (1–50% of balance per trade)';
@@ -1088,7 +1161,7 @@ async function copyCommand(env, args) {
   try { const kp = await keypair(env); wallet = `<code>${kp.addr}</code>`; bal = `${lamportsToSol(await solBalance(env, kp.addr)).toFixed(4)} SOL`; } catch {}
   const open = Object.entries(c.pos).map(([m, p]) => `• $${esc(p.sym || short(m))}: ${p.pending ? 'buying…' : (p.sol || 0).toFixed(4) + ' SOL in, ' + fmtAge(Date.now() - p.at) + ' ago'}`).join('\n') || 'none';
   const last = c.closed.slice(0, 5).map(x => `• $${esc(x.sym)}: ${(x.back - x.sol) >= 0 ? '+' : ''}${(x.back - x.sol).toFixed(4)} SOL`).join('\n') || 'none yet';
-  return `🤖 <b>Copy-trading ${c.on ? 'ON' : 'OFF'}</b>\nCopying: ${await copyNames(env, c)}\nWallet: ${wallet}\nBalance: ${bal || '?'}\nSize: ${c.pct}% per trade · max ${c.maxOpen} open · ${c.buysToday}/${c.maxBuysPerDay} buys today\n\n<b>Open</b>\n${open}\n\n<b>Last closed</b>\n${last}\n\nTotal copy profit: ${(c.realized || 0) >= 0 ? '+' : ''}${(c.realized || 0).toFixed(4)} SOL`;
+  return `🤖 <b>Copy-trading ${c.on ? 'ON' : 'OFF'}</b>\nCopying: ${await copyNames(env, c)}\nWallet: ${wallet}\nBalance: ${bal || '?'}\nSize: ${c.pct}% per trade · max ${c.maxOpen} open · ${c.buysToday}/${c.maxBuysPerDay} buys today\nMax chase: +${c.chase}% above the trader's entry\n\n<b>Open</b>\n${open}\n\n<b>Last closed</b>\n${last}\n\nTotal copy profit: ${(c.realized || 0) >= 0 ? '+' : ''}${(c.realized || 0).toFixed(4)} SOL`;
 }
 
 // ---------------------------------------------------------------- entry
