@@ -668,6 +668,7 @@ async function handleCommand(env, text, chat) {
       if (!w) return reply('Not found. Use /list.');
       cfg.wallets = cfg.wallets.filter(x => x.addr !== w.addr);
       await syncHook(env, cfg); await putCfg(env, cfg);
+      { const c = await getCopy(env); if (c.who.includes(w.addr)) { c.who = c.who.filter(x => x !== w.addr); await putCopy(env, c); } }
       return reply(`🗑 Stopped tracking ${esc(w.label)}${w.auto ? '. It may come back at the next auto refresh; send /auto off to stop that.' : ''}`);
     }
     case '/trader': {
@@ -1127,7 +1128,8 @@ async function copyCommand(env, args) {
   if (a === 'add' || a === 'remove') {
     const cfg = await getCfg(env);
     const q = args.slice(1);
-    if (!q.length) return `Usage: /copy ${a} Pain rayan  (names from /list, or wallet addresses)`;
+    c.who = c.who.filter(x => cfg.wallets.some(w => w.addr === x)); // drop traders you no longer track
+    if (!q.length) { await putCopy(env, c); return `Usage: /copy ${a} Pain rayan  (names from /list, or wallet addresses)\nCopy list: ${await copyNames(env, c)}`; }
     const match = s => cfg.wallets.find(w => w.addr === s || w.label.toLowerCase() === s.toLowerCase() || (s.length >= 4 && w.addr.startsWith(s)));
     let hits = q.map(match);
     if (hits.some(h => !h) && match(q.join(' '))) hits = [match(q.join(' '))];
