@@ -636,6 +636,7 @@ const HELP = `<b>SolRadar</b>
 /copy size 10 — % of balance per trade
 /copy chase 20 — skip if price is 20%+ above the trader's entry
 /copy daily 10 — max copy buys per day
+/copy cleanup — get back the SOL deposits of empty coin accounts
 /sellall — sell every open copy trade now`;
 
 async function handleCommand(env, text, chat) {
@@ -843,7 +844,7 @@ const putCopy = (env, c) => env.KV.put('copy', JSON.stringify(c));
 // ---- base58
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function b58decode(str) {
-  const bytes = [0];
+  const bytes = [];
   for (const ch of str) {
     const v = B58.indexOf(ch);
     if (v < 0) throw new Error('Private key has an invalid character');
@@ -1033,6 +1034,47 @@ async function copyBuy(env, mint, info, buyers, ref = {}) {
   }
 }
 
+// ---- give back the ~0.002 SOL deposit Solana locks for each coin account once it's empty
+const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
+const cu16enc = n => { const o = []; do { let b = n & 0x7f; n >>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; };
+async function edSign(kp, msg) {
+  try { return new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, kp.key, msg)); }
+  catch { return new Uint8Array(await crypto.subtle.sign({ name: 'NODE-ED25519' }, kp.key, msg)); }
+}
+// One transaction closing up to 12 empty accounts of one token program. Returns the signature.
+async function closeBatch(env, kp, program, accts) {
+  const bh = (await rpc(env, 'getLatestBlockhash', [{ commitment: 'confirmed' }]))?.value?.blockhash;
+  if (!bh) throw new Error('no blockhash');
+  const keys = [kp.pub, ...accts.map(a => b58decode(a)), b58decode(program)];
+  const pi = keys.length - 1;
+  const ix = accts.flatMap((_, i) => [pi, ...cu16enc(3), i + 1, 0, 0, ...cu16enc(1), 9]); // CloseAccount(account, dest=owner, owner)
+  const msg = new Uint8Array([1, 0, 1, ...cu16enc(keys.length), ...keys.flatMap(k => [...k]), ...b58decode(bh), ...cu16enc(accts.length), ...ix]);
+  const sig = await edSign(kp, msg);
+  const tx = new Uint8Array([...cu16enc(1), ...sig, ...msg]);
+  return rpc(env, 'sendTransaction', [b64e(tx), { encoding: 'base64', preflightCommitment: 'confirmed' }]);
+}
+// Closes every empty coin account in the bot wallet (skips coins with open trades). Returns SOL recovered.
+async function reclaimRent(env) {
+  const kp = await keypair(env);
+  const c = await getCopy(env);
+  let lamports = 0, closed = 0;
+  for (const program of TOKEN_PROGRAMS) {
+    const r = await rpc(env, 'getTokenAccountsByOwner', [kp.addr, { programId: program }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+    const empty = (r?.value || []).filter(a => {
+      const info = a.account.data?.parsed?.info;
+      return info && info.tokenAmount?.amount === '0' && !c.pos[info.mint];
+    });
+    for (let i = 0; i < empty.length; i += 12) {
+      const part = empty.slice(i, i + 12);
+      try {
+        await closeBatch(env, kp, program, part.map(a => a.pubkey));
+        lamports += part.reduce((s, a) => s + (a.account.lamports || 0), 0); closed += part.length;
+      } catch (e) { console.log('reclaim', e.message); }
+    }
+  }
+  return { sol: lamports / 1e9, closed };
+}
+
 // ---- sell (fraction 0..1)
 async function copySell(env, mint, fraction, reason, tr = null) {
   const c = await getCopy(env);
@@ -1067,6 +1109,7 @@ async function copySell(env, mint, fraction, reason, tr = null) {
     cmp += tr?.px ? `🚪 Exit MC: ${who} ${mcText(tr.px, supply, sol)} · You ${mcText(outPx, supply, sol)}\n` : `🚪 Your exit MC: ${mcText(outPx, supply, sol)}\n`;
     if (tr?.pct != null && myPct != null) cmp += `⚖️ Profit: ${who} ${pctTxt(tr.pct)} · You ${pctTxt(myPct)}\n`;
   } catch {}
+  if (fraction >= 1) { await sleep(1500); const rr = await reclaimRent(env).catch(() => null); if (rr?.closed) cmp += `♻️ Got back ${rr.sol.toFixed(4)} SOL account deposit\n`; }
   await send(env, `🤖🔴 <b>COPY SELL ${fraction >= 1 ? 'ALL' : Math.round(fraction * 100) + '%'}</b> $${esc(q.sym || short(mint))}\nReason: ${esc(reason)}\n💰 Got ${got.toFixed(4)} SOL · ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL (${costPart > 0 ? ((pnl / costPart) * 100).toFixed(0) : '?'}%)\n${cmp}📊 Total copy profit: ${c2.realized >= 0 ? '+' : ''}${c2.realized.toFixed(4)} SOL\n🔗 <a href="https://solscan.io/tx/${r.sig}">Tx</a>`);
 }
 
@@ -1142,6 +1185,10 @@ async function copyCommand(env, args) {
     }
     await putCopy(env, c);
     return `${a === 'add' ? '✅ Now copying' : '🗑 Stopped copying'}: ${found.map(w => esc(w.label)).join(', ')}${bad.length ? `\nNot found: ${esc(bad.join(', '))}` : ''}\n\nCopy list: ${await copyNames(env, c)}${c.on ? '' : '\nCopy-trading is OFF. Send /copy on to start.'}`;
+  }
+  if (a === 'cleanup') {
+    const rr = await reclaimRent(env);
+    return rr.closed ? `♻️ Closed ${rr.closed} empty coin accounts and got back about ${rr.sol.toFixed(4)} SOL. Check /copy in a minute.` : '♻️ Nothing to clean: no empty coin accounts.';
   }
   if (a === 'chase') {
     const v = parseFloat(args[1]);
