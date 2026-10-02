@@ -1045,15 +1045,23 @@ async function edSign(kp, msg) {
 async function closeBatch(env, kp, program, accts) {
   const bh = (await rpc(env, 'getLatestBlockhash', [{ commitment: 'confirmed' }]))?.value?.blockhash;
   if (!bh) throw new Error('no blockhash');
-  const keys = [kp.pub, ...accts.map(a => b58decode(a)), b58decode(program), b58decode('ComputeBudget111111111111111111111111111111')];
+  // accts: [{ pubkey, mint, withheld }]. Coins with a transfer fee (Token-2022) can hold "withheld fees";
+  // those must be swept to the coin's mint first (anyone may do this), otherwise the close fails.
+  const mints = [...new Set(accts.filter(a => a.withheld).map(a => a.mint))];
+  const keys = [kp.pub, ...accts.map(a => b58decode(a.pubkey)), ...mints.map(m => b58decode(m)), b58decode(program), b58decode('ComputeBudget111111111111111111111111111111')];
   const pi = keys.length - 2, cb = keys.length - 1;
   const le = (n, bytes) => Array.from({ length: bytes }, (_, i) => Number((BigInt(n) >> BigInt(8 * i)) & 0xffn));
+  const body = accts.flatMap((a, i) => [
+    ...(a.withheld ? [pi, ...cu16enc(2), 1 + accts.length + mints.indexOf(a.mint), i + 1, ...cu16enc(2), 26, 4] : []), // HarvestWithheldTokensToMint
+    pi, ...cu16enc(3), i + 1, 0, 0, ...cu16enc(1), 9,                                                                  // CloseAccount(account, dest=owner, owner)
+  ]);
+  const nIx = 2 + accts.length + accts.filter(a => a.withheld).length;
   const ix = [
-    cb, 0, ...cu16enc(5), 2, ...le(5000 * accts.length + 2000, 4),      // compute limit
-    cb, 0, ...cu16enc(9), 3, ...le(500000, 8),                          // priority fee (~0.00002 SOL) so it lands
-    ...accts.flatMap((_, i) => [pi, ...cu16enc(3), i + 1, 0, 0, ...cu16enc(1), 9]), // CloseAccount(account, dest=owner, owner)
+    cb, 0, ...cu16enc(5), 2, ...le(8000 * accts.length + 2000, 4),      // compute limit
+    cb, 0, ...cu16enc(9), 3, ...le(500000, 8),                          // small priority fee so it lands
+    ...body,
   ];
-  const msg = new Uint8Array([1, 0, 2, ...cu16enc(keys.length), ...keys.flatMap(k => [...k]), ...b58decode(bh), ...cu16enc(accts.length + 2), ...ix]);
+  const msg = new Uint8Array([1, 0, 2, ...cu16enc(keys.length), ...keys.flatMap(k => [...k]), ...b58decode(bh), ...cu16enc(nIx), ...ix]);
   const sig = await edSign(kp, msg);
   const tx = new Uint8Array([...cu16enc(1), ...sig, ...msg]);
   const txSig = await rpc(env, 'sendTransaction', [b64e(tx), { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 5 }]);
@@ -1070,22 +1078,30 @@ async function closeBatch(env, kp, program, accts) {
 async function reclaimRent(env) {
   const kp = await keypair(env);
   const c = await getCopy(env);
-  let lamports = 0, closed = 0, lastErr = '';
+  let lamports = 0, closed = 0, lastErr = '', failed = 0;
   for (const program of TOKEN_PROGRAMS) {
     const r = await rpc(env, 'getTokenAccountsByOwner', [kp.addr, { programId: program }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
-    const empty = (r?.value || []).filter(a => {
+    const empty = (r?.value || []).map(a => {
       const info = a.account.data?.parsed?.info;
-      return info && info.tokenAmount?.amount === '0' && !c.pos[info.mint];
-    });
-    for (let i = 0; i < empty.length; i += 12) {
-      const part = empty.slice(i, i + 12);
-      try {
-        await closeBatch(env, kp, program, part.map(a => a.pubkey));
-        lamports += part.reduce((s, a) => s + (a.account.lamports || 0), 0); closed += part.length;
-      } catch (e) { console.log('reclaim', e.message); lastErr = e.message; }
+      if (!info || info.tokenAmount?.amount !== '0' || c.pos[info.mint] || info.state === 'frozen') return null;
+      const fee = (info.extensions || []).find(x => x.extension === 'transferFeeAmount');
+      return { pubkey: a.pubkey, mint: info.mint, withheld: Number(fee?.state?.withheldAmount || 0) > 0, lamports: a.account.lamports || 0 };
+    }).filter(Boolean);
+    const tryClose = async part => {
+      await closeBatch(env, kp, program, part);
+      lamports += part.reduce((s, a) => s + a.lamports, 0); closed += part.length;
+    };
+    for (let i = 0; i < empty.length; i += 8) {
+      const part = empty.slice(i, i + 8);
+      try { await tryClose(part); }
+      catch (e) {
+        // One bad account fails the whole batch: retry them one by one so the good ones still close.
+        if (part.length === 1) { lastErr = e.message; failed++; continue; }
+        for (const one of part) { try { await tryClose([one]); } catch (e2) { console.log('reclaim', e2.message); lastErr = e2.message; failed++; } }
+      }
     }
   }
-  return { sol: lamports / 1e9, closed, err: lastErr };
+  return { sol: lamports / 1e9, closed, failed, err: lastErr };
 }
 
 // ---- sell (fraction 0..1)
@@ -1201,7 +1217,7 @@ async function copyCommand(env, args) {
   }
   if (a === 'cleanup') {
     const rr = await reclaimRent(env);
-    if (rr.closed) return `♻️ Confirmed: closed ${rr.closed} empty coin accounts and got back ${rr.sol.toFixed(4)} SOL.${rr.err ? `\n⚠️ Some didn't go through (${esc(rr.err)}). Send /copy cleanup again.` : ''}`;
+    if (rr.closed) return `♻️ Confirmed: closed ${rr.closed} empty coin accounts and got back ${rr.sol.toFixed(4)} SOL.${rr.failed ? `\n${rr.failed} account(s) couldn't be closed (that coin's own rules block it). That's fine, they're skipped.` : ''}`;
     return rr.err ? `⚠️ Cleanup didn't go through: ${esc(rr.err)}. Try /copy cleanup again in a minute.` : '♻️ Nothing to clean: no empty coin accounts.';
   }
   if (a === 'chase') {
@@ -1282,7 +1298,7 @@ export default {
         if (c?.cleanup) {
           ctx.waitUntil((async () => {
             const rr = await reclaimRent(env).catch(e => ({ closed: 0, err: e.message }));
-            if (!rr.err) { const c2 = await getCopy(env); c2.cleanup = false; await putCopy(env, c2); }
+            if (!rr.err || rr.closed || /simulation failed/i.test(rr.err)) { const c2 = await getCopy(env); c2.cleanup = false; await putCopy(env, c2); }
             if (rr.closed) await send(env, `♻️ Got back ${rr.sol.toFixed(4)} SOL from ${rr.closed} empty coin account${rr.closed > 1 ? 's' : ''}.`);
           })());
           return;
